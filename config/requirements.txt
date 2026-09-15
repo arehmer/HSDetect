@@ -1,4 +1,4 @@
 pandas
 #scikit-learn
 #scipy
-numpy==2.5.3
+numpy==1.26.4
