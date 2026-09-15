@@ -1,5 +1,3 @@
-import time
-
 from hspy.tparray import TPArray
 
 import hsdetect
