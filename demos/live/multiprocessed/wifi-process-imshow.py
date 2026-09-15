@@ -19,7 +19,7 @@ from hsdetect.ipc.processes import CVProcess
 # %% Create an argument parser to enable passing argument from the
 # command line to this script
 arg_parser = argparse.ArgumentParser(prog = 'wifi-process-imshow.py',
-                                      description="Connects to a HTPA device via UDP, applies a processing engine and writes the result to a directory.")
+                                      description="Connects to a HTPA device via UDP, applies a computer vision model to the stream and plots the result.")
 
 # %% Add arguments using '--key' style
 arg_parser.add_argument("--bcast",
