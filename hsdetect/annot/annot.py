@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib.patches import Rectangle
 
-from hsdetect.cv.cpp_wrapper import SlidingWindowPyramid
+# from hsdetect.cv.cpp_wrapper import SlidingWindowPyramid
 # from hsdetect.gui.players import AnnotatedVideoPlayer
 from hspytools.tparray import TPArray, ArrayTypes
 from hspy.readers import HTPAdGUI_FileReader 
@@ -181,49 +181,32 @@ class AnnotatedFrame:
                  index:int,
                  image:np.ndarray=None, 
                  annotations:cv2.htpa.DataFrame=None,
-                 mask:np.ndarray=None, 
-                 pyramid:SlidingWindowPyramid=None,
+                 mask:np.ndarray=None,
                  metadata=None):
         
         """
         metadata: optional dict for frame-level info (e.g., 'no_cv')
         """
         
-        if image is not None and pyramid is None:
-            # Single-frame mode
-            self.mode = "single"
-            self.index = index
-            self.pyramid = None
-            self.mask = mask
-            
-            self.metadata = metadata if metadata is not None else {}
-            
-            # In case no annotations are provided, create an empty dataframe
-            # with proper columns
-            if annotations is None:
-                annotations = pd.DataFrame(data=[],
-                                           columns = self.cv_datatypes)
-            
-            self._import_image_annotations(image,annotations)
+        # Single-frame mode
+        self.mode = "single"
+        self.index = index
+        self.pyramid = None
+        self.mask = mask
+        
+        self.metadata = metadata if metadata is not None else {}
+        
+        # In case no annotations are provided, create an empty dataframe
+        # with proper columns
+        if annotations is None:
+            annotations = pd.DataFrame(data=[],
+                                       columns = self.cv_datatypes)
+        
+        self._import_image_annotations(image,annotations)
 
-        elif pyramid is not None and image is None and annotations is None:
-            # Pyramid mode
-            self.mode = "pyramid"
-            self.index = index
-            self.image = None
-            self._annotations = pd.DataFrame(data=[],
-                                             columns = self.cv_datatypes)
-            self.mask = mask
-            self._import_image_pyramid(image,pyramid)
-
-        else:
-            raise ValueError("Provide either (image + optional annotations) or a pyramid")
 
     def is_single(self):
         return self.mode == "single"
-
-    def is_pyramid(self):
-        return self.mode == "pyramid"
 
     def get_image(self):
         if not self.is_single():
@@ -255,19 +238,6 @@ class AnnotatedFrame:
         if self.is_single():
             return self._annotations
         
-        elif self.is_pyramid():
-            pyramid_annotations = []
-            
-            for level in self.pyramid.levels:
-                level_annotations = level.get_original_annotations()
-                
-                if len(level_annotations) != 0:
-                    pyramid_annotations.append(level_annotations)
-                    
-            if len(pyramid_annotations) != 0:
-                pyramid_annotations = pd.concat(pyramid_annotations)
-              
-            return pyramid_annotations
     
     @annotations.setter
     def annotations(self,annot:pd.DataFrame):
@@ -356,18 +326,9 @@ class AnnotatedFrame:
     
         return RoIs
         
-        
-
-    def get_pyramid(self):
-        if not self.is_pyramid():
-            raise RuntimeError("Not in pyramid mode")
-        return self.pyramid
-
     def __repr__(self):
         if self.is_single():
-            return f"<AnnotatedFrame SINGLE image shape={self.image.shape}, annotations={len(self.annotations)}>"
-        else:
-            return f"<AnnotatedFrame PYRAMID levels={(self.pyramid.numLevels())}>"
+            return f"<IR-Frame frame={type(self.image)}, annotations={len(self.annotations)}>"
 
     def _import_image_annotations(self,
                                   image:np.ndarray,
@@ -1260,8 +1221,8 @@ class AnnotatedVideoPlayer:
         
         # Determine global scaling parameters
         if global_scaling:
-            self.vmin = min(float(f.image.min()) for f in video.frames)
-            self.vmax = max(float(f.image.max()) for f in video.frames)
+            self.vmin = min(float(f.image.min()) for f in video.frames if f.image is not None)
+            self.vmax = max(float(f.image.max()) for f in video.frames if f.image is not None)
         else:
             self.vmin = None
             self.max = None
@@ -1358,7 +1319,15 @@ class AnnotatedVideoPlayer:
     def _frame_to_pil(self, i: int) -> tuple[Image.Image, float]:
         
         arr = self.video.frames[i].image  # numpy array
-
+        
+        # If frame is None, create a zero-frame in the shape of the next 
+        # non None frame
+        if arr is None:
+            k = i
+            while self.video.frames[k].image is None:
+                k+=1
+            arr = np.zeros(self.video.frames[k].image.shape)
+        
         # Target display width: base 640 px, scaled by 'scale'
         target_w = max(1, int(round(640 * max(0.01, self.scale))))
         sf = target_w / arr.shape[1]
