@@ -3,7 +3,6 @@ import tensorflow as tf
 
 from hsdetect import Engine
 
-
 IS_ENGINE_MODULE = True
 
 def build_dl_engine(**kwargs):
@@ -22,6 +21,8 @@ def get_classes():
 
 
 class DLEngine(Engine):
+    
+    name = 'DLEngine'
     
     def __init__(self,
              SensorType:int,
@@ -53,6 +54,8 @@ class DLEngine(Engine):
         else:
             raise Exception(f'Model {dl_model} not recognized.')
 
+    def __call__(self,data):
+        return self.dl_model(data)
 
     def save(self):
         """
