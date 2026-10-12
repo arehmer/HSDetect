@@ -54,6 +54,8 @@ class YOLOv2Tiny(tf.keras.Model):
         self.num_anchors = num_anchors
         self.num_classes = num_classes
         
+        self.build_model()
+        
     @property
     def input_shape(self):
         """(H, W, C) this model instance was built for."""
@@ -92,11 +94,19 @@ class YOLOv2Tiny(tf.keras.Model):
         for layer in self.backbone:
             x = layer(x, training=False)
         _, h, w, _ = x.shape
-        return h, w
+        return (h, w)
 
     @property
-    def output_channels(self):
+    def num_output_channels(self):
         return self.num_anchors * (5 + self.num_classes)
+    
+    @property
+    def output_shape(self):
+        
+        # n_batch x grid_h x grid_w x num_anchors * (5 + self.num_classes)
+        output_shape = (n_batch,) + self.grid_shape + (self.num_output_channels,)
+        
+        return output_shape
 
    
     def get_config(self):
@@ -255,8 +265,8 @@ class YOLOv2Tiny8X(YOLOv2Tiny):
             # is the reliable way to build a subclassed tf.keras.Model with
             # nested custom layers (a plain .build() call does not recurse
             # into custom Layer.call-based sublayers).
-            dummy = tf.zeros((1,) + self.input_shape)
-            self(dummy, training=False)
+            batch_len1 = tf.zeros((1,) + self.input_shape)
+            self(batch_len1, training=False)
             
         else:
             print('Model not built because not all properties set.')
