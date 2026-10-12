@@ -20,7 +20,10 @@ import pandas as pd
 
 from .misc import pd_to_cv2_htpa_DataFrame, cv2_to_pd_DataFrame
 
+from hsdetect import Engine
 
+# Marker identifying this .py as a module containing engines
+IS_ENGINE_MODULE = True
 
 def build_classifier_engine(**kwargs):
     name = kwargs.pop('name')
@@ -37,7 +40,7 @@ def get_classes():
         tree = ast.parse(f.read(), filename=__file__)
     return [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
 
-class ClassifierEngine():
+class ClassifierEngine(Engine):
         
     def save(self):
         """

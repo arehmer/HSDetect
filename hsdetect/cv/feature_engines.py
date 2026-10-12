@@ -13,6 +13,8 @@ import pandas as pd
 
 from .misc import pd_to_cv2_htpa_DataFrame, pd_to_cv2_htpa_row_detect
 
+from hsdetect import Engine
+
 # from matplotlib import pyplot as plt
 # import pickle as pkl
 # from pathlib import Path
@@ -23,6 +25,8 @@ from .misc import pd_to_cv2_htpa_DataFrame, pd_to_cv2_htpa_row_detect
 # import time
 # import copy
 
+# Marker identifying this .py as a module containing engines
+IS_ENGINE_MODULE = True
 
 def build_feature_engine(**kwargs):
     name = kwargs.pop('name')
@@ -47,7 +51,7 @@ def get_classes():
         tree = ast.parse(f.read(), filename=__file__)
     return [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
 
-class FeatureEngine():
+class FeatureEngine(Engine):
     
     def __init__(self,
                  SensorType:int,

@@ -30,6 +30,10 @@ from hsdetect.cv.classifier_engine import ClassifierEngine,build_classifier_engi
 
 from hsdetect.annot.annot import AnnotatedFrame,AnnotatedVideo
 
+from hsdetect import Engine
+
+# Marker identifying this .py as a module containing engines
+IS_ENGINE_MODULE = True
 
 def build_detector(**kwargs):
     name = kwargs.pop('name')
@@ -37,10 +41,12 @@ def build_detector(**kwargs):
         return SubDetector(**kwargs)
     elif name == 'OneScaleDetector':
         return OneScaleDetector(**kwargs)
-    if name == 'TwoScaleDetector':
+    elif name == 'TwoScaleDetector':
         return TwoScaleDetector(**kwargs)
-    if name == 'ProposalDetector':
+    elif name == 'ProposalDetector':
         return ProposalDetector(**kwargs)
+    elif name == 'BlobDetector':
+        return BlobDetector(**kwargs)   
     else:
         raise TypeError('Unknown Detector Type!')
         
@@ -50,16 +56,11 @@ def get_classes():
         tree = ast.parse(f.read(), filename=__file__)
     return [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
 
-# def get_classes():
-#     all_classes = []
-#     for name, obj in inspect.getmembers(sys.modules[__name__]):
-#         if inspect.isclass(obj):
-#             all_classes.append(obj)
-#     return dir(sys.modules[__name__])
+
             
 
 # Detector base class
-class Detector():
+class Detector(Engine):
     
     def __init__(self,
                  SensorType:int,
@@ -415,7 +416,218 @@ class ProposalDetector(OneScaleDetector): # Formerly DummyDetector
         return return_dict
         
         
+class BlobDetector(Detector):
+
+    name = 'BlobDetector'
+
+    def __init__(self, **attr_dict):
+
+        # Call constructor of parent class (Detector)
+        SensorType = attr_dict.pop('SensorType', None)
+        super(BlobDetector, self).__init__(SensorType,
+                                           **attr_dict)
         
+        # --------------------- TPArray Instance ----------------------------
+        self.htpa = TPArray(SensorType = SensorType)
+
+        # ------------------------- Thresholding -----------------------------
+        self.threshold = attr_dict.pop('threshold', None)
+
+        # ------------------- Expected blob size (in pixels) ------------------
+        self.expected_width = attr_dict.pop('expected_width', 5)
+        self.expected_height = attr_dict.pop('expected_height', 5)
+
+        # --------- Max allowed pixel value inside a candidate bbox -----------
+        self.max_pixel_value = attr_dict.pop('max_pixel_value', None)
+
+    @property
+    def threshold(self):
+        return self._threshold
+
+    @threshold.setter
+    def threshold(self, value):
+        if value is None:
+            raise Exception('BlobSizeDetector requires a threshold value.')
+        self._threshold = value
+
+    @property
+    def expected_width(self):
+        return self._expected_width
+
+    @expected_width.setter
+    def expected_width(self, value):
+        self._expected_width = value
+
+    @property
+    def expected_height(self):
+        return self._expected_height
+
+    @expected_height.setter
+    def expected_height(self, value):
+        self._expected_height = value
+
+    @property
+    def max_pixel_value(self):
+        return self._max_pixel_value
+
+    @max_pixel_value.setter
+    def max_pixel_value(self, value):
+        if value is None:
+            raise Exception('BlobSizeDetector requires a max_pixel_value.')
+        self._max_pixel_value = value
+
+
+    def _process_avideo(self,
+                        video:AnnotatedVideo,
+                        **kwargs):
+        
+        # Check if inputs have proper type
+        if not isinstance(video,AnnotatedVideo):
+            raise TypeError('video is not type AnnotatedVideo')
+                     
+        # Initialize list to store video with detection results in
+        annotated_frames = []
+
+        for frame in video:
+            
+            # Get frame and index
+            img = frame.image
+            img = img.astype(np.uint16)
+
+            idx = frame.index
+            
+            # Call process_frame() on frame
+            return_dict = \
+                self._process_frame(img,
+                                    idx)
+            
+            # Append returned AnnotatedFrame 
+            aframe = AnnotatedFrame(return_dict['idx'],
+                                    return_dict['frame'],
+                                    return_dict['annotations'])
+            
+            annotated_frames.append(aframe)
+            
+           
+        # In the end return an annotated video
+        return AnnotatedVideo(frames = annotated_frames)
+
+    @staticmethod
+    def _zero_isolated_pixels(binary):
+        """
+        Zero every pixel that has no non-zero neighbour at the
+        12, 3, 6, and 9 o'clock positions (i.e. no non-zero direct
+        N/E/S/W neighbour).
+        """
+        # Cross-shaped kernel: counts N, E, S, W neighbours only
+        # (center weight 0 so the pixel's own value doesn't count).
+        kernel = np.array([[0, 1, 0],
+                            [1, 0, 1],
+                            [0, 1, 0]], dtype=np.uint8)
+
+        nonzero_mask = (binary > 0).astype(np.uint8)
+        neighbour_count = cv2.filter2D(nonzero_mask, -1, kernel,
+                                        borderType=cv2.BORDER_CONSTANT)
+
+        filtered = binary.copy()
+        filtered[neighbour_count == 0] = 0
+        return filtered
+
+    def _process_frame(self,
+                        frame: np.ndarray,
+                        idx: int,
+                        **kwargs: dict) -> dict:
+
+
+        frame = frame.astype(np.uint16)
+        
+        
+        if idx == 359:
+            pass
+        
+        # ---------------------- Threshold the image --------------------------
+        binary = (frame >= self.threshold).astype(np.uint8)
+
+        # ------------- Zero pixels with no non-zero direct neighbour ----------
+        binary = self._zero_isolated_pixels(binary)
+
+        # zero pixels in the corners
+        binary[~self.htpa._detection_mask.astype(bool)] = 0
+
+        # ---------------------- Connected components -------------------------
+        num_labels, labels, stats, centroids = \
+            cv2.connectedComponentsWithStats(binary, connectivity=4)
+
+        expected_area = self.expected_width * self.expected_height
+
+        # ------------- Find blob closest to expected size ----------------
+        # Label 0 is always the background; skip it.
+        best_label = None
+        best_diff = None
+        for label in range(1, num_labels):
+
+            # # ---- Reject blobs whose center falls on a masked-out area ----
+            # cx, cy = centroids[label]
+            # cx_int, cy_int = int(round(cx)), int(round(cy))
+            # if self.htpa._detection_mask[cy_int, cx_int] == 0:
+            #     continue
+
+            # ---- Compute candidate bounding box ----
+            x = stats[label, cv2.CC_STAT_LEFT]
+            y = stats[label, cv2.CC_STAT_TOP]
+            w = stats[label, cv2.CC_STAT_WIDTH]
+            h = stats[label, cv2.CC_STAT_HEIGHT]
+            
+            xtl, ytl = x, y
+            xbr, ybr = x + w, y + h
+            
+            # --------------- Reject to small bounding boxes  -----------------
+            if w < 3 or h < 3:
+                continue
+            
+            # ---- Reject blobs whose bbox pixels exceed max_pixel_value ----
+            bbox_patch = frame[ytl:ybr, xtl:xbr]
+            if np.any(bbox_patch > self.max_pixel_value):
+                continue
+
+            # ---- Track closest-to-expected-size candidate ----
+            area = stats[label, cv2.CC_STAT_AREA]
+            diff = abs(area - expected_area)
+            if best_diff is None or diff < best_diff:
+                best_diff = diff
+                best_label = label
+
+        # ---------------------- Bounding box of chosen blob ------------------
+        bbox = None
+        if best_label is not None:
+            xtl = stats[best_label, cv2.CC_STAT_LEFT]
+            ytl = stats[best_label, cv2.CC_STAT_TOP]
+            w = stats[best_label, cv2.CC_STAT_WIDTH]
+            h = stats[best_label, cv2.CC_STAT_HEIGHT]
+
+            xbr = xtl + w
+            ybr = ytl + h
+            
+            # Create annotations as pd.DataFrame
+            columns = AnnotatedFrame.cv_datatypes
+            bbox = pd.DataFrame(data=[[-99]*len(columns)],
+                                columns = columns)
+        
+            bbox.loc[0,'idx'] = 0
+            bbox.loc[0,'image_id'] = idx
+            bbox.loc[0,['xtl', 'ytl', 'xbr', 'ybr', 'w', 'h']] = \
+                     (xtl, ytl, xbr, ybr, w, h)
+            
+            if not bbox.index.name == "id":
+                bbox.index.rename('id',inplace=True)
+            
+
+        # Prepare dictionary for return
+        return_dict = {'frame': frame,
+                       'idx': None,
+                       'annotations': bbox}
+
+        return return_dict        
     
     
     

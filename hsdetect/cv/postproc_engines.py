@@ -14,6 +14,10 @@ import cv2
 # from hsdetect.cv.misc import pd_IoU 
 # from eval_measures import IoU
 
+from hsdetect import Engine
+
+# Marker identifying this .py as a module containing engines
+IS_ENGINE_MODULE = True
 
 def build_postprocessing_engine(**kwargs):
     name = kwargs.pop('name')
@@ -26,7 +30,7 @@ def get_classes():
         tree = ast.parse(f.read(), filename=__file__)
     return [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
 
-class PostprocEngine():
+class PostprocEngine(Engine):
     
     pass
 

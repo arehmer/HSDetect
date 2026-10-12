@@ -40,7 +40,7 @@ import numpy as np
 
 import copy 
 
-from hsdetect.misc.annot import AnnotatedFrame,AnnotatedVideo 
+from hsdetect.annot.annot import AnnotatedFrame,AnnotatedVideo 
 
 __all__ = [
     "OpticalFlowEstimator",

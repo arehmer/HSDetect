@@ -12,6 +12,12 @@ import matplotlib.pyplot as plt
 from hsdetect.annot.annot import RoI
 from . import misc
 
+from hsdetect import Engine
+
+# Marker identifying this .py as a module containing engines
+IS_ENGINE_MODULE = True
+
+
 def build_tracker(**kwargs):
     name = kwargs.pop('name')
     if name == 'BlockTracker':
@@ -25,7 +31,7 @@ def get_classes():
         tree = ast.parse(f.read(), filename=__file__)
     return [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
 
-class Tracker():
+class Tracker(Engine):
     
     def __init__(self,
                  SensorType:int,

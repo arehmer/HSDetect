@@ -1,0 +1,44 @@
+# hsdetect.mot tracker configuration (keys match hsdetect/mot/config.py)
+
+# Detection thresholds
+tau_cache: 0.05
+tau_bg: 0.5
+tau_low: 0.1
+tau_high: 0.5
+tau_init: 0.6
+
+# Kalman filter
+sigma_pos: 0.05
+sigma_vel: 0.00625
+r_min: 0.05
+min_size: 0.5
+coast_size_vel_damping: 1.0
+
+# Score smoothing
+score_method: ema
+alpha: 0.8
+c_miss: 0.0
+logit_q: 0.5
+logit_r: 1.0
+
+# Track lifecycle
+M: 3
+N: 5
+max_age: 30
+max_coast_output: 5
+tau_out: 0.3
+
+# Features and gating
+gate_by_class: true
+chi2_gate: 13.2767
+class_pair_embedding: false
+num_classes: 1
+
+# Association cost
+cost: mahalanobis
+iou_min: 0.3
+maha_lambda: 9.4877
+logit_offset: 0.0
+
+# Ground truth assignment / evaluation
+iou_assign: 0.5

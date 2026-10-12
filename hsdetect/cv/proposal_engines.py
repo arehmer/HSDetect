@@ -11,12 +11,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 import hsdetect
-from hsdetect.cv import cpp_wrapper
+# from hsdetect.cv import cpp_wrapper
 from hsdetect.annot.annot import AnnotatedFrame, AnnotatedVideo
 from hspy.tparray import TPArray
 from hsdetect.cv import misc
 import cv2
 
+from hsdetect import Engine
+
+# Marker identifying this .py as a module containing engines
+IS_ENGINE_MODULE = True
 
 def build_proposal_engine(**kwargs):
     name = kwargs.pop('name')
@@ -48,7 +52,7 @@ def get_classes():
     return [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
 
 
-class ProposalEngine():
+class ProposalEngine(Engine):
     
     cv_datatypes = {'idx':'int32','xtl':'int32','ytl':'int32',
                     'xbr':'int32','ybr':'int32','w':'int32',

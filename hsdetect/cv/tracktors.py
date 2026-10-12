@@ -18,7 +18,10 @@ from hsdetect.cv.trackers import Tracker,build_tracker
 from . import misc
 from hsdetect.annot.annot import AnnotatedFrame, AnnotatedVideo
 
+from hsdetect import Engine
 
+# Marker identifying this .py as a module containing engines
+IS_ENGINE_MODULE = True
 
 def build_tracktor(**kwargs):
     name = kwargs.pop('name')
@@ -35,7 +38,7 @@ def get_classes():
         tree = ast.parse(f.read(), filename=__file__)
     return [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
 
-class Tracktor():
+class Tracktor(Engine):
     
     def __init__(self,
                  SensorType:int,
