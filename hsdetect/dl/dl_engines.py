@@ -47,7 +47,7 @@ class DLEngine(Engine):
     def dl_model(self,dl_model):
         if dl_model is None:
             self._dl_model = None
-        elif isinstance(dl_model, Path):
+        elif isinstance(dl_model, Path) or isinstance(dl_model, str):
             self._dl_model = tf.keras.models.load_model(dl_model)
         elif isinstance(dl_model,tf.keras.Model):
             self._dl_model = dl_model

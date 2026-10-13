@@ -30,6 +30,7 @@ This gives the overall x4 downsampling factor stated in the paper (as
 opposed to the x32 used by higher-resolution detectors), preserving enough
 spatial resolution for the ultra low-res thermal input.
 """
+from pathlib import Path
 
 import tensorflow as tf
 
@@ -42,19 +43,34 @@ import keras
 class YOLOv2Tiny(tf.keras.Model):
     
     def __init__(self,
-                 name,
+                 name : str,
+                 save_path : str,
                  input_shape = None,
                  num_anchors = None,
                  num_classes = None,
                   **kwargs,
                  ):
-        super().__init__(name=name)
+        super(YOLOv2Tiny,self).__init__(name=name)
         
+        
+        self.save_path = save_path
         self.input_shape = input_shape
         self.num_anchors = num_anchors
         self.num_classes = num_classes
         
         self.build_model()
+
+    @property
+    def save_path(self):
+        """Path that is passed to tf.keras.Model.save()"""
+        return self._save_path
+    @save_path.setter
+    def save_path(self,save_path : str):
+        if isinstance(save_path,Path):
+            save_path = save_path.as_posix()
+        if not isinstance(save_path,str):
+            raise TypeError(f'Expected {str}, received {type(save_path)}')
+        self._save_path = save_path
         
     @property
     def input_shape(self):
@@ -112,9 +128,10 @@ class YOLOv2Tiny(tf.keras.Model):
     def get_config(self):
         config = super().get_config()
         config.update({
-            "input_shape": self.input_shape,
-            "num_anchors": self.num_anchors,
-            "num_classes": self.num_classes,
+            "input_shape" : self.input_shape,
+            "num_anchors" : self.num_anchors,
+            "num_classes" : self.num_classes,
+            "save_path" : self.save_path
             })
         return config
     
@@ -123,8 +140,25 @@ class YOLOv2Tiny(tf.keras.Model):
             x = layer(x, training=training)
         x = self.head(x, training=training)
         return x
+    
+    def save(self):
+        """
+        Wrapper for tf.keras.Model.save(), which calls tf.keras.Model.save()
+        with self.path / self.name as argument.
 
+        Returns
+        -------
+        None.
 
+        """
+        # Convert str to Path
+        save_path = Path(self.save_path)
+        
+        path = ( save_path / (self.name + '.keras')).as_posix()
+        super(YOLOv2Tiny,self).save(path)
+        
+        return path
+        
 
 @keras.saving.register_keras_serializable()
 class YOLOv2Tiny4X(YOLOv2Tiny):

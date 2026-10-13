@@ -27,6 +27,19 @@ from hsdetect import Engine
 
 IS_ENGINE_MODULE = True
 
+def build_decoding_engine(**kwargs):
+    name = kwargs.pop('name')
+    if name == 'YOLO_EnDecode_Engine':
+        return YOLO_EnDecode_Engine(**kwargs)
+    else:
+        raise TypeError(f'Unknown Inference Engine {name}!')
+
+import ast       
+def get_classes():
+    with open(__file__, 'r') as f:
+        tree = ast.parse(f.read(), filename=__file__)
+    return [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+
 @dataclass
 class Detection:
     xtl: float
