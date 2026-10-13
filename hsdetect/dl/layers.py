@@ -97,7 +97,7 @@ class DepthwiseSeparableConv(tf.keras.layers.Layer):
             padding="same",
             use_bias=False,
         )
-        self.dw_bn = tf.keras.layers.BatchNormalization(momentum=0.1)
+        self.dw_bn = tf.keras.layers.BatchNormalization()
         self.dw_act = _get_activation("relu6")
 
         self.pw_conv = tf.keras.layers.Conv2D(
@@ -107,9 +107,9 @@ class DepthwiseSeparableConv(tf.keras.layers.Layer):
             padding="same",
             use_bias=False,
         )
-        self.pw_bn = tf.keras.layers.BatchNormalization(momentum=0.1)
+        self.pw_bn = tf.keras.layers.BatchNormalization()
         self.pw_act = _get_activation("relu6")
-        print('Set momentum to 0.1 for debugging!')
+
     def call(self, x, training=False):
         x = self.dw_conv(x)
         x = self.dw_bn(x, training=training)
