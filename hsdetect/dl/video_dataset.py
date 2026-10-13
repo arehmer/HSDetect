@@ -24,7 +24,7 @@ import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-from .targets import xyxy_to_center, assign_boxes, encode_box
+from hsod.dl.targets import xyxy_to_center, assign_boxes, encode_box
 
 
 def build_frame_targets(

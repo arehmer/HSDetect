@@ -40,7 +40,7 @@ except:
 from hsdetect import build_engine, Engine
 
 # from .background import BackgroundEngine
-from hsdetect.dl.decode import Detection, decode_predictions
+from hsdetect.dl.decode import Detection
 from hsdetect.dl.models import YOLOv2Tiny
 
 IS_ENGINE_MODULE = True
