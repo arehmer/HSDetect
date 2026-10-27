@@ -88,8 +88,38 @@ class PreprocEngine(Engine):
                 
         return attr_dict
     
-    def __call__(self,data):
-        return self.process(data)
+    def __call__(self,frames,frame_index,**kwargs):
+        """ Call function only calls process. call() ist for compatibility with
+        dl models, process() for compatibility with cv models. """
+        
+
+        # Create two numpy arrays for the processed frames and index filled with
+        # zeros
+        frame_res = np.zeros(frames.shape, frames.dtype)
+        frame_index_res = np.zeros(frame_index.shape, frame_index.dtype)
+        
+        # Create a mapping from frame index to location index. Needed if 
+        # processing engine has an internal buffer and does not return
+        # frames in the same order that it obtained them
+        idx_to_loc = {k:idx for k,idx in zip( range(len(frame_index)),frame_index)}
+        
+        for frame, idx in zip(frames,frame_index):
+            
+            # Pass current frame to engine, which returns a processed frame,
+            # possibly not the current one, be aware of the index!
+            frame_proc, idx_proc = self._process_frame(frame = frame,
+                                                       idx = idx,
+                                                       **kwargs)
+            
+            # Map idx_proc to destined location in frame_res
+            k = idx_to_loc[idx_proc]
+            
+            # Write frame_proc and idx_proc to output arrays
+            frame_res[k, ...] = frame_proc
+            frame_index_res[k] = idx_proc
+            
+        return frame_res, frame_index_res
+
     
     def step(self,data:dict,**kwargs):
         return self._process_frame(frame = data['frame'],
@@ -153,6 +183,21 @@ class PreprocEngAWA(PreprocEngine):
     @eps.setter
     def eps(self,eps:float):
         self._eps = eps
+        
+    def __call__(self,frames,frame_index,**kwargs):
+        
+        frames_res, frame_index_res = \
+            super(PreprocEngAWA, self).__call__(frames, frame_index, **kwargs)
+            
+        # Depending on the filter order, the last K frames will be missing
+        # from frame_res and frame_index_res!
+        # Therefore the last K frames with be zero, which is fine.
+        # The last K entries in frame_index_res though must be fixed to have a
+        # steadily increasing index:
+        for k in range(self.K):
+            frame_index_res[-k-1] =  frame_index[-k-1]
+            
+        return frames_res, frame_index_res
 
     
     def _process_frame(self,
@@ -162,21 +207,23 @@ class PreprocEngAWA(PreprocEngine):
                 
         frame = frame.astype(np.uint16)
         
-        idx_filt, img_proc = self.cv_preproc_engine.process(frame,
-                                                            idx)
+        idx_proc, frame_proc = self.cv_preproc_engine.process(frame,
+                                                              idx)
         
-        # # Create an AnnotatedFrame
-        # annot_frame =  AnnotatedFrame(index = idx_filt,
-        #                               image = img_proc,
-        #                               annotations = annotations)
+        return frame_proc, idx_proc
+        
+        # # # Create an AnnotatedFrame
+        # # annot_frame =  AnnotatedFrame(index = idx_filt,
+        # #                               image = img_proc,
+        # #                               annotations = annotations)
                 
-        # Prepare dictionary for return
-        return_dict = {}    
-        return_dict.update(kwargs)          # keep passed kwargs
-        return_dict['frame'] = img_proc     # overwrite frame with result
-        return_dict['idx'] = idx_filt       # overwrite idx with result
+        # # Prepare dictionary for return
+        # return_dict = {}    
+        # return_dict.update(kwargs)          # keep passed kwargs
+        # return_dict['frame'] = img_proc     # overwrite frame with result
+        # return_dict['idx'] = idx_filt       # overwrite idx with result
                 
-        return return_dict
+        # return return_dict
     
     def _process_avideo(self,
                         video:AnnotatedVideo,
@@ -346,13 +393,7 @@ class BackgroundSub(PreprocEngine):
     def box_pad(self,box_pad:int):
         self._box_pad = box_pad       
 
-    # ---- Step 1: background construction -------------------------------
-
-    def __call__(self,data,**kwargs):
-        """ Call function only calls process. call() ist for compatibility with
-        dl models, process() for compatibility with cv models. """
-        return self.process(data,**kwargs)
-    
+    # ---- Step 1: background construction -------------------------------    
     def step(self,data:dict,**kwargs):
         return self._process_frame(frame = data['frame'],
                                    idx = data['idx'],
@@ -509,8 +550,9 @@ class BackgroundSub(PreprocEngine):
         # "has bg ever been assigned" -- bg is set on the very first
         # update_bg() call, before N_init images have actually been seen).
         if not self._bg_valid:
-            warnings.warn(f'Background not established, returning {None}')
-            return None
+            warnings.warn(f'Background not established, returning zeros')
+            return np.zeros(current_frame.shape,
+                            current_frame.dtype)
         
         # Subtract
         frame_bgsub = current_frame.astype(np.float32) - self.bg
@@ -537,20 +579,26 @@ class BackgroundSub(PreprocEngine):
     def _process_frame(self,
                        frame:np.ndarray,
                        idx:int,
+                       detections : pd.DataFrame = pd.DataFrame(),
                        **kwargs:dict) -> dict:    
         
         
+        # Subtract background from current frame
         backsub_frame = self.subtract(frame)
         
+        # Update background
+        self.update_bg(frame,
+                        detections)
+        
         # Prepare dictionary for return
-        return_dict = {}    
-        return_dict.update(kwargs)                # keep passed kwargs
-        return_dict['frame'] = backsub_frame      # overwrite frame with result
-        return_dict['idx'] = idx                  # overwrite frame with result
-        return_dict['bg'] = self.bg               # overwrite frame with result
-        return_dict['bg_mask'] = self.bg_mask     # overwrite frame with result        
+        # return_dict = {}    
+        # return_dict.update(kwargs)                # keep passed kwargs
+        # return_dict['frame'] = backsub_frame      # overwrite frame with result
+        # return_dict['idx'] = idx                  # overwrite frame with result
+        # return_dict['bg'] = self.bg               # overwrite frame with result
+        # return_dict['bg_mask'] = self.bg_mask     # overwrite frame with result        
                 
-        return return_dict
+        return backsub_frame, idx
         
     def _process_aframe(self,
                        frame : AnnotatedFrame,
