@@ -121,6 +121,7 @@ class InferenceEngine:
         
     def __call__(self, frame, frame_idx = None, **kwargs):
         
+        
         return self.step(frame,
                          frame_idx,
                          **kwargs)

@@ -2,6 +2,8 @@ import time
 from pathlib import Path
 import warnings
 import pickle as pkl
+import numpy as np
+import cv2
 
 from hspy.tparray import TPArray
 
@@ -13,6 +15,8 @@ from hsdetect.cv.inf_engines import InferenceEngine
 from hsdetect import build_engine
 
 from hspy.ipc.processes import RWProcess_R1
+
+
 
 class CVProcess(RWProcess_R1):
     """
@@ -172,7 +176,7 @@ class InferenceProcess(RWProcess_R1):
         if data['success'] == True:
             
             # Get frame 
-            frame = data['frame']
+            frame = data['frame'].reshape((120,160))
             
             try:
                 # Pass frame to inference engine

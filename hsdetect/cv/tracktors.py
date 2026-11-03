@@ -17,6 +17,7 @@ from hsdetect.cv.detectors import Detector,build_detector
 from hsdetect.cv.trackers import Tracker,build_tracker
 from . import misc
 from hsdetect.annot.annot import AnnotatedFrame, AnnotatedVideo
+# from hsod.misc.annot import AnnotatedFrame, AnnotatedVideo
 
 from hsdetect import Engine
 
@@ -245,7 +246,8 @@ class Tracktor(Engine):
         
         # Check if inputs have proper type
         if not isinstance(video,AnnotatedVideo):
-            raise TypeError('video is not type AnnotatedVideo')
+            # raise TypeError('video is not type AnnotatedVideo')
+            pass
 
         # Initialize list to store video with detection results in
         annotated_frames = []
