@@ -1,6 +1,9 @@
 from pathlib import Path
 import tensorflow as tf
+import pandas as pd
+import numpy as np
 
+from hspy.tparray import TPArray
 from hsdetect import Engine
 
 IS_ENGINE_MODULE = True
@@ -29,6 +32,7 @@ class DLEngine(Engine):
              **attr_dict:dict):
         
         self.SensorType = SensorType  
+        self.htpa = TPArray(SensorType = SensorType)
         self.dl_model = attr_dict.pop('dl_model',None)
         
     @property
@@ -55,7 +59,17 @@ class DLEngine(Engine):
             raise Exception(f'Model {dl_model} not recognized.')
 
     def __call__(self,data):
-        return self.dl_model(data)
+        
+        frame = data['frame']
+        idx = data['idx']
+        
+        if frame is None:
+            return None
+        else:
+            yolo_shape = (1,) + frame.shape + (1,)
+            frame = frame.reshape(yolo_shape).astype(np.float32)
+            return self.dl_model(frame)
+
 
     def save(self):
         """

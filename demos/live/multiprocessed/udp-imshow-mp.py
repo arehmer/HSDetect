@@ -89,7 +89,8 @@ if __name__ == '__main__':
     print('Starting processes...')
     client_process.start()
     plot_process.start()
-
+    print('Processes started.')
+    
     # NOTE: unlike UDP_PickleClient.listen_addr (a plain property that
     # works immediately because the thread shares the parent's memory),
     # the socket here only exists inside the child process once it has
@@ -99,11 +100,13 @@ if __name__ == '__main__':
     print(f'Listening on {client_process.get_listen_addr()}...')
 
     try:
-        # Keep running, receiving and displaying frames until Ctrl+C
-        while True:
-            time.sleep(0.5)
+        # Keep the main process alive and responsive without wasting
+        # too many resources, waiting for Enter
+        input('Press Enter to stop...\n')
+        print("Stopping processes...")
 
     except KeyboardInterrupt:
+        # Ctrl+C still works as a fallback; EOFError if stdin is closed
         print("\nStopping processes...")
     finally:
         plot_process.stop()
@@ -114,6 +117,4 @@ if __name__ == '__main__':
 
         recv_buffer.close()
 
-        print("Processes stopped.")
-
-    print('End')
+        print("All processes stopped.")

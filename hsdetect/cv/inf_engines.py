@@ -32,6 +32,9 @@ from typing import List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+import logging
+
+
 try:
     from ..misc.annot import AnnotatedVideo, AnnotatedFrame
 except:
@@ -42,6 +45,8 @@ from hsdetect import build_engine, Engine
 # from .background import BackgroundEngine
 from hsdetect.dl.decode import Detection
 from hsdetect.dl.models import YOLOv2Tiny
+
+logger = logging.getLogger(__name__)
 
 IS_ENGINE_MODULE = True
 
@@ -82,7 +87,7 @@ class InferenceEngine:
         self._check_engines()
         
         # Bookkeeping
-        self._frame_counter = 0  
+        self._frame_idx = 0  
 
                 
     @property
@@ -114,18 +119,21 @@ class InferenceEngine:
         # Build or rebuild the inference pipeline
         self._build_inference_pipeline()
         
-    def __call__(self,data,**kwargs):
-        return self.process(data,**kwargs)
+    def __call__(self, frame, frame_idx = None, **kwargs):
         
-    def process(self,data,**kwargs):
-        if isinstance(data,dict):
-            return self.step(frame = data['frame'],
-                             idx = data['idx'],
-                             **kwargs)
-        elif isinstance(data,AnnotatedVideo):
-            return self._process_avideo(data,**kwargs)
-        else:
-            raise NotImplementedError()
+        return self.step(frame,
+                         frame_idx,
+                         **kwargs)
+        
+    # def process(self,data,**kwargs):
+    #     if isinstance(data,dict):
+    #         return self.step(frame = data['frame'],
+    #                          idx = data['idx'],
+    #                          **kwargs)
+    #     elif isinstance(data,AnnotatedVideo):
+    #         return self._process_avideo(data,**kwargs)
+    #     else:
+    #         raise NotImplementedError()
 
     def save(self):
         """
@@ -176,8 +184,11 @@ class InferenceEngine:
 
     def step(self,
              frame : np.ndarray,
+             frame_idx : int, 
              **kwargs):
         
+        # db output
+        # print(f'Frame index {self._frame_idx}.')
         
         # If ground truth annotations are provided, these will be used for 
         # updating the background engine
@@ -185,23 +196,28 @@ class InferenceEngine:
         
         # If index is provided (e.g. because a video with indexed frames is 
         # processed) use that index, otherwise use the internal counter
-        idx = kwargs.pop('idx',self._frame_counter)
+        frame_idx = self._frame_idx if frame_idx is None else frame_idx
         
         # Initialize a dictionary for storing the input, intermediate results,
         # and final output of the inference pipeline
         inference = {}
         inference['input'] = {'frame':frame, 
-                              'idx': idx}    # the first element is the raw frame
-        
+                              'idx': frame_idx}    # the first element is the raw frame
+               
         # Run all engines after each other in the order that they were given
         for engine_name,engine in self._inference_pipeline.items():
             
+            # print(f'Processing engine: {engine_name}')
             # Obtain the input to the engine from self.IOmapping
             engine_input = self.IOmapping[engine_name]
             
             # Feed the input to the engine, and store the engines output under
             # its name 
-            inference[engine_name] = engine(inference[engine_input])
+            try:
+                inference[engine_name] = engine(inference[engine_input])
+            except Exception:
+                logger.exception("Engine %s failed", engine_name)
+                raise
         
         
         
@@ -216,7 +232,7 @@ class InferenceEngine:
         #     self._inference_pipeline[engine_name]
         
         # Increment the internal counter (whether it is used or not)
-        self._frame_counter += 1
+        self._frame_idx += 1
             
         return inference
     
@@ -229,7 +245,8 @@ class InferenceEngine:
         if gt is not None:
             update_annotations = gt
         else:
-            update_annotations = inference[list(inference.keys())[-1]]['annot']
+            update_annotations = inference['YOLO_EnDecode_Engine']
+            
     
         update_frame = inference['PreprocEngAWA']['frame']
     

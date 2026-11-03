@@ -1,8 +1,16 @@
+import time
+from pathlib import Path
+import warnings
+import pickle as pkl
+
 from hspy.tparray import TPArray
 
 import hsdetect
 from hsdetect.cv.detectors import build_detector
 from hsdetect.cv.tracktors import build_tracktor
+from hsdetect.cv.inf_engines import InferenceEngine
+
+from hsdetect import build_engine
 
 from hspy.ipc.processes import RWProcess_R1
 
@@ -107,3 +115,81 @@ class CVProcess(RWProcess_R1):
 
     def stop(self):
         self._exit.set()
+        
+        
+class InferenceProcess(RWProcess_R1):
+    """
+    Class for running a hsdetect.cv.inference engine as a process..
+    Reads frames from read_buffer, runs object detection, writes the
+    result (original data + detections) into write_buffer.
+    """
+    
+    def __init__(self,
+                 name: str,
+                 model_dir: Path,
+                 write_buffer,
+                 read_buffer,
+                 **kwargs):
+        
+        self.model_dir = Path(model_dir)
+        self.inference_engine = None
+        self._internal_frame_idx = 0
+        
+        super().__init__(name=name,
+                         read_buffer=read_buffer,
+                         write_buffer = write_buffer,
+                         **kwargs)
+        
+    def _setup(self,):
+        
+        # Build the model from the directory given
+        # 1. Look for a .dict file that contains the inference engine para-
+        # meters
+        for file in self.model_dir.iterdir():
+            
+            if file.suffix == '.dict':
+                
+                with open(file,'rb') as io:
+                    inf_engine_params = pkl.load(io)
+                    try:
+                        self.inference_engine = build_engine(**inf_engine_params)
+                        print('Inference engine built.')
+                    except:
+                        pass
+                
+        if self.inference_engine is None:
+            raise RuntimeError('Was not able to build inference engine from ' + \
+                               f'{self.model_dir}.')
+        
+            
+    def _target(self):
+
+        # Get result from upstream process
+        data = self.read_buffer.get()
+        
+        
+        # If success flag is set, pass frame to inference engine
+        if data['success'] == True:
+            
+            # Get frame 
+            frame = data['frame']
+            
+            try:
+                # Pass frame to inference engine
+                inference = self.inference_engine(frame)
+                
+                
+                # Add result to dict
+                data['inference'] = inference
+                
+                # Set success flag to True
+                data['success'] = True
+                
+            except Exception as e:
+                print(f"[{self.name}] {e}")
+                
+                # Set success flag to False in case of failure
+                data['success'] = False
+
+        return data
+        

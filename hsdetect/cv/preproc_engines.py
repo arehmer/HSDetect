@@ -160,7 +160,7 @@ class PreprocEngAWA(PreprocEngine):
                        idx:int,
                        **kwargs : dict) -> dict:
                 
-        frame = frame.astype(np.uint16)
+        frame = frame.astype(np.uint16).reshape(self._tparray._npsize)
         
         idx_filt, img_proc = self.cv_preproc_engine.process(frame,
                                                             idx)

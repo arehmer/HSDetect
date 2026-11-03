@@ -98,8 +98,12 @@ class YOLO_EnDecode_Engine(Engine):
         htpa = TPArray(SensorType = self.SensorType)
         w = htpa.width; h = htpa.height
         
-        self._yolo_grid_cell_size = (h / self.yolo_grid_size[0] ,
-                                     w / self.yolo_grid_size[1])
+        self.yolo_grid_cell_size = (h / self.yolo_grid_size[0] ,
+                                    w / self.yolo_grid_size[1])
+        
+        self.yolo_stride = self.yolo_grid_cell_size
+        self.yolo_n_anchors = len(yolo_anchors)
+        self.n_anchor_channels = (5 + yolo_n_classes) * self.yolo_n_anchors
        
     @property
     def SensorType(self):
@@ -117,7 +121,7 @@ class YOLO_EnDecode_Engine(Engine):
     def yolo_anchors(self,yolo_anchors:np.ndarray):
         self._yolo_anchors = yolo_anchors
         self._yolo_n_anchors = len(yolo_anchors)
-        self._n_anchor_channels = (5 + self.yolo_n_classes) * len(yolo_anchors)
+        self.n_anchor_channels = (5 + self.yolo_n_classes) * len(yolo_anchors)
         
     @property
     def yolo_grid_size(self):
@@ -134,27 +138,35 @@ class YOLO_EnDecode_Engine(Engine):
     @yolo_n_classes.setter
     def yolo_n_classes(self,yolo_n_classes:int):
         self._yolo_n_classes = yolo_n_classes
-        self._n_anchor_channels = (5 + yolo_n_classes) * self.yolo_n_anchors
+        # self.n_anchor_channels = (5 + yolo_n_classes) * self.yolo_n_anchors
         
-    @property
-    def yolo_n_anchors(self):
-        return self._yolo_n_anchors
-    @property
-    def n_anchor_channels(self):
-        return self._n_anchor_channels
+    # @property
+    # def yolo_n_anchors(self):
+    #     return self._yolo_n_anchors
+    # @property
+    # def n_anchor_channels(self):
+    #     return self._n_anchor_channels
     
-    @property
-    def yolo_grid_cell_size(self):
-        return self._yolo_grid_cell_size
+    # @property
+    # def yolo_grid_cell_size(self):
+    #     return self._yolo_grid_cell_size
     
-    @yolo_grid_cell_size.setter
-    def yolo_grid_cell_size(self,yolo_grid_cell_size : Tuple[int,int]):
-        self._yolo_grid_cell_size = yolo_grid_cell_size
+    # @yolo_grid_cell_size.setter
+    # def yolo_grid_cell_size(self,yolo_grid_cell_size : Tuple[int,int]):
+    #     self._yolo_grid_cell_size = yolo_grid_cell_size
      
-    @property
-    def yolo_stride(self):
-        return self.yolo_grid_cell_size    # Stride is same as size of grid cells
+    # @property
+    # def yolo_stride(self):
+    #     return self.yolo_grid_cell_size    # Stride is same as size of grid cells
     
+    
+    def __call__(self,
+                 yolo_output : tf.Tensor):
+        
+        if yolo_output is None:
+            return pd.DataFrame()
+        else:
+            return self.decode_yolo_prediction(yolo_output)
     
     def unpack_anchor_channels(self,
                                yolo_output : tf.Tensor):
@@ -202,9 +214,9 @@ class YOLO_EnDecode_Engine(Engine):
         n_batch, grid_h, grid_w = shape[0], shape[1], shape[2]
         n_anchor_channels = shape[3]
         
-        if (grid_h,grid_w) != self.yolo_grid:
+        if (grid_h,grid_w) != self.yolo_grid_size:
             raise ValueError(f'Deducted grid size {(grid_h,grid_w)} but ' +\
-                             ' expected {self.yolo_grid}')
+                             ' expected {self.yolo_grid_size}')
         
                 
         if n_anchor_channels != self.n_anchor_channels:
@@ -240,29 +252,36 @@ class YOLO_EnDecode_Engine(Engine):
 
         """
         
-        # Check dimensions of tensor
-        shape = tf.shape(yolo_output_unpacked)
-        
+        # Check dimensions of tensor. The rank is read from the static shape,
+        # because tf.shape() returns a tensor, whose elementwise comparison
+        # can not be evaluated by an if-statement
+        rank = len(yolo_output_unpacked.shape)
+
         # If tensor has 4 dimensions, try to unpack it to 5
-        if len(shape) == 4:
+        if rank == 4:
             yolo_output_unpacked = self.unpack_anchor_channels(yolo_output_unpacked)
         # If tensor has 5 dimensions, it is unpacked already, pass on
-        elif len(shape) == 5:
+        elif rank == 5:
             pass
-        # Raise error in all other cases 
+        # Raise error in all other cases
         else:
             raise ValueError('Expected yolo vector with 4 or 5 ' + \
                              'dimensions, but received tensor with ' + \
-                              f'{len(shape)} dimensions.')
-        
-        # If tensor has the expected 5 dimensions, check if the last 4 
-        # dimensions have the proper size
-        exp_shape = self.yolo_grid + (self.yolo_n_anchors,) + \
-            (self.n_anchor_channels,)
-        
+                              f'{rank} dimensions.')
+
+        # If tensor has the expected 5 dimensions, check if the last 4
+        # dimensions have the proper size. The shape is read again, because
+        # the tensor has possibly been unpacked above
+        shape = tuple(yolo_output_unpacked.shape)
+
+        # Note: the last axis of an unpacked tensor holds the channels of one
+        # single anchor, i.e. (5 + n_classes), and not n_anchor_channels
+        exp_shape = self.yolo_grid_size + (self.yolo_n_anchors,) + \
+            (5 + self.yolo_n_classes,)
+
         if not shape[1::] == exp_shape:
             raise ValueError('Expected unpacked yolo vector with shape[1::]=' + \
-                             '{exp_shape} but received tensor with ' + \
+                             f'{exp_shape} but received tensor with ' + \
                               f'shape[1::]={shape[1::]}.')
                 
         # Apply sigmoidal activation function to the tx, ty and conf channel
@@ -347,7 +366,7 @@ class YOLO_EnDecode_Engine(Engine):
         
         data = np.hstack([xtl,ytl,xbr,ybr,bw,bh,conf,class_probs])
         
-        # Create a list of dictionaries, each dicionary containing a row
+        # Create a list of dictionaries, each dictionary containing a row
         # of the 2d array data
         bboxes = []
         for row, (cy, cx, a) in zip(data, grid_idx):
@@ -356,10 +375,9 @@ class YOLO_EnDecode_Engine(Engine):
             bbox['cell_y'], bbox['cell_x'], bbox['anchor_idx'] = idx
             bbox['id'] = idx_to_annotID.get(idx)   # None if no match
             bboxes.append(bbox)
-    
+            
         return bboxes    
-        
-
+    
     def _offset_to_absolute_coords(self,
                                    t : tf.Tensor) -> tf.Tensor:
         """
@@ -447,7 +465,8 @@ class YOLO_EnDecode_Engine(Engine):
     
     def decode_yolo_prediction(self,
                                yolo_output : tf.Tensor,
-                               idx_to_annotID: Dict[TargetIndex,int] = {}) -> pd.DataFrame:
+                               idx_to_annotID: Dict[TargetIndex,int] = {},
+                               constrain = True) -> pd.DataFrame:
         """
         Expects a packed (4 dimensions) yolo output tensor with shape
         
@@ -483,7 +502,7 @@ class YOLO_EnDecode_Engine(Engine):
         if not n_batch == 1:
             raise ValueError(f'Expected batch size 1 but received {n_batch}.')
         
-        # ----------------- Constrain tx, tx and conf channel -----------------
+        # ----------------- Constrain tx, ty and conf channel -----------------
         if len(shape) == 4:
             yolo_output = self.unpack_anchor_channels(yolo_output)
         # If tensor has 5 dimensions, it is unpacked already, pass on
@@ -494,25 +513,34 @@ class YOLO_EnDecode_Engine(Engine):
             raise ValueError('Expected yolo vector with 4 or 5 ' + \
                              'dimensions, but received tensor with ' + \
                               f'{len(shape)} dimensions.')
-        
-
-        
+                
+        # Constrain the output channels
+        if constrain:
+            yolo_output = self.constrain_channels(yolo_output)
         
         # ------------- Convert the tensor to bounding boxes ------------------
         bboxes = self._yolo_predictions_to_bboxes(yolo_output,
                                                   idx_to_annotID)
         
-        bboxes = pd.DataFrame.from_dict(bboxes)
+        # Convert the list bboxes into a pd.DataFrame
+        df_bboxes = pd.DataFrame.from_dict(bboxes)
         
-        bboxes = bboxes.set_index('id', drop = True)
+        # In the end, replace possibly None values as id with unique ids
+        existing_ids = pd.to_numeric(df_bboxes["id"], errors="coerce").dropna()
+        fill_id = int(existing_ids.max()) + 1 if not existing_ids.empty else 0
         
-        return pd.DataFrame.from_dict(bboxes)
+        # Replace None/NaN with that value
+        mask_na = df_bboxes["id"].isna()
+        df_bboxes.loc[mask_na, "id"] = range(fill_id, fill_id + mask_na.sum())
         
-        
+        # Set the annotation id as index for DataFrame
+        df_bboxes = df_bboxes.set_index('id', drop = True)
+
+        return df_bboxes
+    
     def encode_yolo_target(self,
                            annotations : pd.DataFrame,
                            ) -> Tuple[np.ndarray, list] :
-        
         
         # Check type
         if not isinstance(annotations, pd.DataFrame):
@@ -589,6 +617,43 @@ class YOLO_EnDecode_Engine(Engine):
                 yolo_target[batch_idx][target_idx][5 + class_idx] = 1.0
             
         return yolo_target, image_id_to_batch_idx, idx_to_annotID
+    
+    
+    def save(self):
+        """
+        Overrides standard save method, which only stores attributes, but 
+        is not capable of storing objects which have a save() method of 
+        their own.
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        attr_dict = {}
+        
+        for attr_name in dir(self):
+            # get the attribute *on the class*, not the instance
+            attr = getattr(self.__class__, attr_name, None)
+        
+            # check if it's a property
+            if isinstance(attr, property):
+                
+                # Retrieve the value of the property attr
+                attr_val = getattr(self, attr_name)
+                
+                # If the property has a save() method, save the return value of
+                # that method
+                if hasattr(attr_val, "save") and callable(attr_val.save):
+                    attr_dict[attr_name] = attr_val.save()
+                else:
+                    attr_dict[attr_name] = attr_val
+                
+        # Append name
+        attr_dict['name'] = self.name
+                
+        return attr_dict
         
 
     
@@ -765,6 +830,7 @@ if __name__ == "__main__":
     # 2. Create Encoding Engine
     anchors = np.array([[10,20],
                        [20,40]])
+    
     grid_size = (15,20)
     n_classes = 0
     
@@ -785,9 +851,12 @@ if __name__ == "__main__":
     yolo_target_500 = yolo_target[idx500:idx500+1,...] 
     
     img80_annot_yolo = encode_engine.decode_yolo_prediction(yolo_target_80,
-                                                            idx_to_annotID[80])
+                                                            idx_to_annotID[80],
+                                                            constrain = False)
+    
     img500_annot_yolo = encode_engine.decode_yolo_prediction(yolo_target_500,
-                                                             idx_to_annotID[500])
+                                                             idx_to_annotID[500],
+                                                             constrain = False)
     
     # 5. Compare to the original ground truth annotations
     img80_annot = annot.loc[annot['image_id']==80]
