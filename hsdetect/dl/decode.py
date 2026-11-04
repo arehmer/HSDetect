@@ -532,7 +532,7 @@ class YOLO_EnDecode_Engine(Engine):
                                yolo_output : tf.Tensor,
                                idx_to_annotID: Dict[TargetIndex,int] = {},
                                constrain = True,
-                               conf_threshold : float = 0.8,
+                               conf_threshold : float = 0.5,
                                nms_iou_threshold : float = 0.4,
                                clip_boxes : bool = True) -> pd.DataFrame:
         """

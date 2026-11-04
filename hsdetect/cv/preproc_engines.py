@@ -327,8 +327,9 @@ class BackgroundSub(PreprocEngine):
         return self._bg
     
     @bg.setter
-    def bg(self,bg:int):
-        self._bg = bg 
+    def bg(self,bg):
+        # Keep the background in float32
+        self._bg = None if bg is None else np.asarray(bg, dtype=np.float32)
         
     @property
     def bg_mask(self):
@@ -463,7 +464,7 @@ class BackgroundSub(PreprocEngine):
 
         # ---- 2b. Exclude pixels whose diff from the current bg exceeds
         #      thresh_update, in addition to detected pixels ----
-        abs_diff = np.abs(current_frame.astype(np.int32) - self.bg.astype(np.int32))
+        abs_diff = np.abs(current_frame.astype(np.float32) - self.bg)
         diff_mask = np.where(abs_diff > self.thresh_update, np.uint8(255), np.uint8(0))
         det_mask = np.bitwise_or(det_mask, diff_mask)
 
@@ -473,11 +474,11 @@ class BackgroundSub(PreprocEngine):
         # ---- 4. Background candidate: excluded pixels keep old bg,
         #      valid (det_mask == 0) pixels take the current frame ----
         excluded = det_mask.astype(bool)
-        bg_cand = np.where(excluded, self.bg, current_frame)
+        bg_cand = np.where(excluded, self.bg, current_frame.astype(np.float32))
 
         # ---- EMA update, with saturate_cast-style round + clip to uint16 ----
-        bg_float = self.decay * self.bg.astype(np.float32) + (1.0 - self.decay) * bg_cand.astype(np.float32)
-        self.bg = np.clip(np.round(bg_float), 0, 65535).astype(np.uint16)
+        bg_float = self.decay * self.bg + (1.0 - self.decay) * bg_cand
+        self.bg = np.clip(bg_float, 0, 65535)
 
         # ---- n_init / bg_valid bookkeeping (exact port, two sequential ifs) ----
         if not self._bg_valid and self._n_init < self.N_init - 1:
