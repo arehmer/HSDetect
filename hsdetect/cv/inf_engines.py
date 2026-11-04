@@ -119,11 +119,43 @@ class InferenceEngine:
         # Build or rebuild the inference pipeline
         self._build_inference_pipeline()
         
-    def __call__(self, frame, frame_idx = None, **kwargs):
+    def __call__(self, data, frame_idx = None, conf_min = 0.9, **kwargs):
         
-        return self.step(frame,
-                         frame_idx,
-                         **kwargs)
+        # Check type of passed data
+        if isinstance(data,AnnotatedVideo):
+            
+            video_res = {}
+            
+            for aframe in data:
+                frame = aframe.image
+                frame_idx = aframe.index
+                
+                inf_res = self.step(frame,
+                                    frame_idx)
+                
+                frame = inf_res['ZeroCorners']['frame']
+                idx = inf_res['PreprocEngAWA']['idx']
+                df_annot = inf_res['YOLO_EnDecode_Engine']
+                if len(df_annot)!=0:
+                    df_annot = df_annot.loc[df_annot['conf'] >= conf_min]
+                
+                video_res[idx] = (frame,df_annot)
+            
+            # Convert to AnnotatedVideo
+            aframes = []
+            for idx, res in video_res.items():
+                aframe = AnnotatedFrame(idx,res[0],res[1])
+                aframes.append(aframe)
+                
+            avideo = AnnotatedVideo()
+            avideo.from_AnnotatedFrames(frames=aframes)
+            return avideo
+        
+        else:
+            
+            return self.step(frame,
+                             frame_idx,
+                             **kwargs)
         
     # def process(self,data,**kwargs):
     #     if isinstance(data,dict):
