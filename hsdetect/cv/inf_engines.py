@@ -120,7 +120,7 @@ class InferenceEngine:
         self._build_inference_pipeline()
         
     def __call__(self, data, frame_idx = None, conf_min = 0.9, **kwargs):
-        
+
         # Check type of passed data
         if isinstance(data,AnnotatedVideo):
             
@@ -156,6 +156,7 @@ class InferenceEngine:
             return self.step(frame,
                              frame_idx,
                              **kwargs)
+        
         
     # def process(self,data,**kwargs):
     #     if isinstance(data,dict):

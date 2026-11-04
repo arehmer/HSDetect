@@ -327,8 +327,9 @@ class BackgroundSub(PreprocEngine):
         return self._bg
     
     @bg.setter
-    def bg(self,bg:int):
-        self._bg = bg 
+    def bg(self,bg):
+        # Keep the background in float32
+        self._bg = None if bg is None else np.asarray(bg, dtype=np.float32)
         
     @property
     def bg_mask(self):
@@ -396,10 +397,7 @@ class BackgroundSub(PreprocEngine):
 
           1. Build a detection mask: 255 for pixels overlapping any
              (box_pad-enlarged) detection box, 0 otherwise. Enlarged boxes
-             are clipped to [0, w-1] / [0, h-1] -- NOTE: this reproduces
-             the C++ code's clipping exactly, including its off-by-one
-             behavior (clipping to w-1/h-1 rather than w/h means the very
-             last row/column is never fully covered by a clipped box).
+             are clipped to [0, w-1] / [0, h-1]
           2. First call ever (no background established yet): bg is set
              directly to the current frame, bg_mask to the negated
              detection mask, and the method returns early -- no EMA
@@ -450,12 +448,11 @@ class BackgroundSub(PreprocEngine):
         det_mask = np.zeros((h, w), dtype=np.uint8)
         for idx, detection in detections.iterrows():
             xtl, ytl, xbr, ybr = detection[['xtl','ytl','xbr','ybr']]
-            # Faithful port of the C++ clipping: max(0, ... - pad) and
-            # min(w-1, ... + pad) / min(h-1, ... + pad) -- NOT min(w, ...).
+            # Clipping
             xtl_c = max(0, int(xtl) - self.box_pad)
             ytl_c = max(0, int(ytl) - self.box_pad)
-            xbr_c = min(w - 1, int(xbr) + self.box_pad)
-            ybr_c = min(h - 1, int(ybr) + self.box_pad)
+            xbr_c = min(w, int(xbr) + self.box_pad)
+            ybr_c = min(h, int(ybr) + self.box_pad)
             det_mask[ytl_c:ybr_c, xtl_c:xbr_c] = 255
 
         # ---- Exception: first call ever -- no valid background yet ----
@@ -467,7 +464,7 @@ class BackgroundSub(PreprocEngine):
 
         # ---- 2b. Exclude pixels whose diff from the current bg exceeds
         #      thresh_update, in addition to detected pixels ----
-        abs_diff = np.abs(current_frame.astype(np.int32) - self.bg.astype(np.int32))
+        abs_diff = np.abs(current_frame.astype(np.float32) - self.bg)
         diff_mask = np.where(abs_diff > self.thresh_update, np.uint8(255), np.uint8(0))
         det_mask = np.bitwise_or(det_mask, diff_mask)
 
@@ -477,11 +474,11 @@ class BackgroundSub(PreprocEngine):
         # ---- 4. Background candidate: excluded pixels keep old bg,
         #      valid (det_mask == 0) pixels take the current frame ----
         excluded = det_mask.astype(bool)
-        bg_cand = np.where(excluded, self.bg, current_frame)
+        bg_cand = np.where(excluded, self.bg, current_frame.astype(np.float32))
 
         # ---- EMA update, with saturate_cast-style round + clip to uint16 ----
-        bg_float = self.decay * self.bg.astype(np.float32) + (1.0 - self.decay) * bg_cand.astype(np.float32)
-        self.bg = np.clip(np.round(bg_float), 0, 65535).astype(np.uint16)
+        bg_float = self.decay * self.bg + (1.0 - self.decay) * bg_cand
+        self.bg = np.clip(bg_float, 0, 65535)
 
         # ---- n_init / bg_valid bookkeeping (exact port, two sequential ifs) ----
         if not self._bg_valid and self._n_init < self.N_init - 1:
@@ -639,7 +636,26 @@ class BackgroundSub(PreprocEngine):
         
         # In the end return an annotated video
         return video_bg
-    
+
+# def shrink_and_center(img: np.ndarray, factor: float) -> np.ndarray:
+#     if not 0 < factor < 1:
+#         raise ValueError("factor must be between 0 and 1")
+
+#     h, w = img.shape[:2]
+#     new_w, new_h = max(1, int(round(w * factor))), max(1, int(round(h * factor)))
+
+#     # INTER_AREA is the best interpolation for downscaling
+#     small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+#     # Zero-initialized canvas with the original shape and dtype
+#     canvas = np.zeros_like(img)
+
+#     top = (h - new_h) // 2
+#     left = (w - new_w) // 2
+#     canvas[top:top + new_h, left:left + new_w] = small
+
+#     return canvas    
+
 class ZeroCorners(PreprocEngine):
         
     name = 'ZeroCorners'
@@ -671,6 +687,9 @@ class ZeroCorners(PreprocEngine):
         
         # Set corners (detection_mask = 0) to zero
         frame[~detection_mask] = 0
+        
+        # Shrink and center (commented out, trying to fix through augmentation)
+        # frame = shrink_and_center(frame,0.64)
         
         # Create an AnnotatedFrame
         # annot_frame =  AnnotatedFrame(index = idx,

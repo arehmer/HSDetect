@@ -101,6 +101,13 @@ class YOLO_EnDecode_Engine(Engine):
         self.yolo_grid_cell_size = (h / self.yolo_grid_size[0] ,
                                     w / self.yolo_grid_size[1])
         
+        # Image dimensions in pixels. Needed to clip decoded boxes to the
+        # frame: bx,by are confined to their grid cell, but bw,bh are not
+        # bounded at all (bw = pw*e^tw), so a box whose center sits closer
+        # than half its own width/height to a border reaches outside the
+        # image
+        self.img_size = (h, w)
+        
         self.yolo_stride = self.yolo_grid_cell_size
         self.yolo_n_anchors = len(yolo_anchors)
         self.n_anchor_channels = (5 + yolo_n_classes) * self.yolo_n_anchors
@@ -164,7 +171,7 @@ class YOLO_EnDecode_Engine(Engine):
                  yolo_output : tf.Tensor):
         
         if yolo_output is None:
-            return pd.DataFrame()
+            return self._empty_annotations()
         else:
             return self.decode_yolo_prediction(yolo_output)
     
@@ -463,10 +470,71 @@ class YOLO_EnDecode_Engine(Engine):
         # Return
         return b
     
+    def _clip_boxes_to_image(self,
+                             bboxes : List[dict]) -> List[dict]:
+        """
+        Clips the corner coordinates of every decoded box to the image, i.e.
+        to [0,w] in x and [0,h] in y, and recomputes the w,h entries from the
+        clipped corners so that every row stays self-consistent 
+        (w = xbr - xtl).
+        
+        Note that this discards the part of a prediction that lies outside
+        the image: bw,bh as predicted by yolo are the dimensions of the WHOLE
+        object, including whatever part of it is cut off by the image border,
+        whereas after clipping w,h describe the visible part only.
+
+        Parameters
+        ----------
+        bboxes : List[dict]
+            Decoded boxes as returned by _yolo_predictions_to_bboxes().
+
+        Returns
+        -------
+        List[dict]
+            The same boxes with xtl,ytl,xbr,ybr,w,h clipped to the image.
+            
+        """
+        
+        h, w = self.img_size
+        
+        for bbox in bboxes:
+            
+            bbox['xtl'] = min(max(bbox['xtl'], 0.0), float(w))
+            bbox['ytl'] = min(max(bbox['ytl'], 0.0), float(h))
+            bbox['xbr'] = min(max(bbox['xbr'], 0.0), float(w))
+            bbox['ybr'] = min(max(bbox['ybr'], 0.0), float(h))
+            
+            # Keep the dimensions consistent with the clipped corners
+            bbox['w'] = bbox['xbr'] - bbox['xtl']
+            bbox['h'] = bbox['ybr'] - bbox['ytl']
+            
+        return bboxes
+    
+    def _empty_annotations(self) -> pd.DataFrame:
+        """
+        Returns an empty annotation DataFrame carrying the same columns and
+        index as a non-empty decode_yolo_prediction() result.
+        
+        pd.DataFrame() and pd.DataFrame.from_dict([]) both come back without
+        any columns at all, which breaks every consumer that indexes one
+        (BackgroundSub.update_bg(), the plotting processes, ...) instead of
+        simply iterating over zero rows.
+        """
+        
+        columns = ['xtl','ytl','xbr','ybr','w','h','conf'] +\
+            [f'class_{str(i)}' for i in range(self.yolo_n_classes)] +\
+            ['cell_y','cell_x','anchor_idx']
+        
+        return pd.DataFrame(columns = columns,
+                            index = pd.Index([], name = 'id'))
+    
     def decode_yolo_prediction(self,
                                yolo_output : tf.Tensor,
                                idx_to_annotID: Dict[TargetIndex,int] = {},
-                               constrain = True) -> pd.DataFrame:
+                               constrain = True,
+                               conf_threshold : float = 0.5,
+                               nms_iou_threshold : float = 0.4,
+                               clip_boxes : bool = True) -> pd.DataFrame:
         """
         Expects a packed (4 dimensions) yolo output tensor with shape
         
@@ -486,6 +554,39 @@ class YOLO_EnDecode_Engine(Engine):
         ----------
         yolo_output : tf.Tensor
             DESCRIPTION.
+        conf_threshold : float
+            Predictions whose objectness sigmoid(to) lies below this value
+            are discarded. Note that EVERY grid cell / anchor combination
+            carries a prediction (grid_h * grid_w * n_anchors of them), so
+            without a threshold here the decoder returns the full grid as
+            "detections" -- which is not only noisy downstream, but also
+            feeds a fully covered detection mask into BackgroundSub.
+            update_bg(), freezing the background estimate.
+        nms_iou_threshold : float
+            Two surviving boxes overlapping by more than this IoU are
+            treated as duplicates of the same object, and only the more
+            confident one is kept. Slightly below the conventional 0.45-0.5
+            by default, because this network downsamples by x4 only: with a
+            stride of 8 px and anchors 13-23 px wide, one object falls into
+            the receptive field of several neighbouring cells and tends to
+            be predicted repeatedly. Raise it if two objects can genuinely
+            stand close enough to overlap by this much. Pass None to
+            switch suppression off altogether -- necessary when decoding an
+            encoded GROUND-TRUTH target rather than a prediction, where
+            overlapping boxes are all genuine and none of them may be
+            dropped (see encode_yolo_target() and the __main__ self-test).
+        clip_boxes : bool
+            Clip the surviving boxes to the image (default). The decoding
+            itself places bx,by inside the predicting cell but leaves bw,bh
+            unbounded, so a box belonging to an object that is only partly
+            inside the field of view reaches past the border and comes out
+            with negative xtl/ytl (or xbr/ybr beyond the sensor's width/
+            height) -- which is correct as a statement about the object, but
+            not a valid annotation of the image. Clipping happens AFTER
+            suppression, so it cannot change which boxes are considered
+            duplicates of each other. Pass False to get the raw predicted
+            extent, e.g. when decoding an encoded GROUND-TRUTH target that
+            has to come back out exactly as it went in.
 
         Returns
         -------
@@ -521,6 +622,71 @@ class YOLO_EnDecode_Engine(Engine):
         # ------------- Convert the tensor to bounding boxes ------------------
         bboxes = self._yolo_predictions_to_bboxes(yolo_output,
                                                   idx_to_annotID)
+        
+        # ------------ Discard predictions below the confidence ---------------
+        # Every grid cell / anchor slot produced a row above, so this is
+        # where the vast majority of them are dropped again
+        bboxes = [bbox for bbox in bboxes if bbox['conf'] >= conf_threshold]
+        
+        # ------------------- Non-max suppression (greedy) --------------------
+        # A single object typically triggers the same anchor in several
+        # neighbouring cells. Walk the predictions from most to least
+        # confident, keep each one, and drop every later box that overlaps
+        # it by more than nms_iou_threshold. Class-agnostic, which is what
+        # the paper's single implicit-class design calls for (n_classes=0);
+        # with explicit classes this would have to run per class.
+        if nms_iou_threshold is not None and len(bboxes) > 1:
+            
+            boxes = np.array([[bbox['xtl'], bbox['ytl'], bbox['xbr'], bbox['ybr']]
+                              for bbox in bboxes], dtype=np.float64)
+            scores = np.array([bbox['conf'] for bbox in bboxes], dtype=np.float64)
+            
+            areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+            
+            # Indices of all predictions, ordered by descending confidence
+            order = scores.argsort()[::-1]
+            
+            keep = []
+            while order.size > 0:
+                
+                # The most confident of the remaining predictions always
+                # survives
+                i = order[0]
+                keep.append(i)
+                
+                # Intersection of box i with every remaining box
+                rest = order[1:]
+                xtl = np.maximum(boxes[i, 0], boxes[rest, 0])
+                ytl = np.maximum(boxes[i, 1], boxes[rest, 1])
+                xbr = np.minimum(boxes[i, 2], boxes[rest, 2])
+                ybr = np.minimum(boxes[i, 3], boxes[rest, 3])
+                
+                inter = np.clip(xbr - xtl, 0, None) * np.clip(ybr - ytl, 0, None)
+                
+                # IoU of box i with every remaining box
+                union = areas[i] + areas[rest] - inter
+                iou = inter / np.clip(union, 1e-9, None)
+                
+                # Keep only those that are not duplicates of box i for the
+                # next round
+                order = rest[iou <= nms_iou_threshold]
+            
+            bboxes = [bboxes[i] for i in keep]
+        
+        # -------------------- Clip the boxes to the image --------------------
+        # bw,bh are unbounded, so a box can reach past the border -- clipped
+        # here, after suppression, so the IoUs above are computed on the
+        # predicted extent of the objects rather than on their visible part
+        if clip_boxes:
+            bboxes = self._clip_boxes_to_image(bboxes)
+        
+        # ------------- Exit early if nothing survived the above --------------
+        # pd.DataFrame.from_dict([]) yields a DataFrame without any columns,
+        # which breaks every consumer that indexes a column (BackgroundSub.
+        # update_bg(), the plotting processes, ...). Hand back a properly
+        # typed, empty annotation DataFrame instead.
+        if len(bboxes) == 0:
+            return self._empty_annotations()
         
         # Convert the list bboxes into a pd.DataFrame
         df_bboxes = pd.DataFrame.from_dict(bboxes)
@@ -850,13 +1016,23 @@ if __name__ == "__main__":
     idx500 = img_to_batch[500]
     yolo_target_500 = yolo_target[idx500:idx500+1,...] 
     
+    # Note: a target tensor carries conf=1 for every annotated box, and all
+    # of those boxes are genuine -- so neither thresholding nor suppression
+    # may touch them, or an overlapping pair would be silently merged and
+    # the comparison in step 5 would fail.
     img80_annot_yolo = encode_engine.decode_yolo_prediction(yolo_target_80,
                                                             idx_to_annotID[80],
-                                                            constrain = False)
+                                                            constrain = False,
+                                                            conf_threshold = 0.0,
+                                                            nms_iou_threshold = None,
+                                                            clip_boxes = False)
     
     img500_annot_yolo = encode_engine.decode_yolo_prediction(yolo_target_500,
                                                              idx_to_annotID[500],
-                                                             constrain = False)
+                                                             constrain = False,
+                                                             conf_threshold = 0.0,
+                                                             nms_iou_threshold = None,
+                                                             clip_boxes = False)
     
     # 5. Compare to the original ground truth annotations
     img80_annot = annot.loc[annot['image_id']==80]
