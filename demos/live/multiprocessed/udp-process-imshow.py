@@ -115,7 +115,7 @@ if __name__ == '__main__':
     
     # Create instance of the InferenceProcess
     inf_process = InferenceProcess(name = 'inference_process',
-                                   model_dir = 'C:/Users/Rehmer/Documents/GitHub/HSDetect/demos/live/multiprocessed/models',
+                                   model_dir = 'C:/Users/Rehmer/Documents/GitHub/HSDetect/demos/live/multiprocessed/models/yolo_scaled',
                                    read_buffer = udp_buffer,
                                    write_buffer = process_buffer)
 

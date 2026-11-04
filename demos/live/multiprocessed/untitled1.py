@@ -5,44 +5,49 @@ Created on Thu Oct 29 16:31:12 2026
 @author: rehmer
 """
 import pickle as pkl
-import numpy as np
+from pathlib import Path
+# import numpy as np
 from hspy.tparray import SensorTypes
 
 from hsdetect import build_engine
 
 
-file = 'C:/Users/Rehmer/Documents/GitHub/HSDetect/demos/live/multiprocessed/models/inf_engine_params.dict'
+SCRIPT_DIR = Path(__file__).resolve().parent
+
+file_in = SCRIPT_DIR / 'models' / 'yolo' / 'inf_engine_params.dict'
+file_out = SCRIPT_DIR / 'models' / 'yolo_scaled' / 'inf_engine_params_scaled.dict'
 
 
-
-with open(file,'rb') as io:
-    inf_engine_params = pkl.load(io)
-
-    
-    # Add a decoding engine to the inference pipeline
-    decoding_engine = build_engine(name = 'YOLO_EnDecode_Engine',
-                                   SensorType = SensorTypes['HTPA160x120DR1_L3K95_0K8'],
-                                   yolo_anchors = np.array([[15., 13.],
-                                                            [23., 17.],
-                                                            [18., 23.]]),
-                                   yolo_grid_size = (15,20),
-                                   yolo_n_classes = 0)
-    
-    decoding_engine_params = decoding_engine.save()
-    inf_engine_params['engines'].append(decoding_engine_params)
-    
-    # Build inference engine
-    inference_engine = build_engine(**inf_engine_params)
-    print('Inference engine built.')
-    
-    # inf_engine_params = inference_engine.save()
-    # pkl.dump(inf_engine_params,open('./models/inf_engine_params.dict','wb'))
-
-for i in range(10):
-    fake_frame = np.random.random(size = (120,160)).astype(np.uint16)
-    result = inference_engine(fake_frame)
+# %% Load inf_engine_params.dict
+with open(file_in,'rb') as io:
+    engine_params_dict = pkl.load(io)
 
 
-# result = inference_engine.engines[3](fake_frame)
+# %% Create an engine for downscaling the data
+scaling_factor = 0.6
 
-# result = inference_engine.engines[3](fake_frame.
+shrink_engine = build_engine(name = 'ShrinkCenter',
+                             SensorType = SensorTypes['HTPA160x120DR1_L3K95_0K8'],
+                             factor = scaling_factor)
+
+box_rescale_engine = build_engine(name = 'BoxRescale',
+                              SensorType = SensorTypes['HTPA160x120DR1_L3K95_0K8'],
+                              factor = scaling_factor)
+
+# %% Insert shrink_engine parameters before the yolo model and the  
+# box_rescale_engine parameters after  the decoding engine
+engine_pipeline = engine_params_dict['engines']
+
+engine_pipeline.insert(3,shrink_engine.save())
+engine_pipeline.append(box_rescale_engine.save())
+
+# %% Also change dl_model path
+engine_pipeline[4]['dl_model'] = \
+    'C:/Users/Rehmer/Documents/GitHub/HSDetect/demos/live/multiprocessed/models/yolo_scaled/YOLOv2Tiny8X.keras'
+
+# %% Write pipeline back to parameter dict
+engine_params_dict['engines'] = engine_pipeline
+
+# %% Store the updated parameter dictionary
+pkl.dump(engine_params_dict,
+         open(file_out,'wb'))
