@@ -28,6 +28,8 @@ def build_preprocessing_engine(**kwargs):
         return ZeroCorners(**kwargs)
     elif name == 'BackgroundSub':
         return BackgroundSub(**kwargs)
+    elif name == 'ShrinkCenter':
+        return ShrinkCenter(**kwargs)
     else:
         raise Exception('Preprocessing Engine ' + name + ' not known!')
 
@@ -755,6 +757,62 @@ class ZeroCorners(PreprocEngine):
         ZeroCorners has no memory components to reset      
         """        
         return None
+
+def shrink_and_center(img: np.ndarray, factor: float) -> np.ndarray:
+    if not 0 < factor < 1:
+        raise ValueError("factor must be between 0 and 1")
+
+    h, w = img.shape[:2]
+    new_w, new_h = max(1, int(round(w * factor))), max(1, int(round(h * factor)))
+
+    # INTER_AREA is the best interpolation for downscaling
+    small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+    # Zero-initialized canvas with the original shape and dtype
+    canvas = np.zeros_like(img)
+
+    top = (h - new_h) // 2
+    left = (w - new_w) // 2
+    canvas[top:top + new_h, left:left + new_w] = small
+
+    return canvas
+    
+class ShrinkCenter(PreprocEngine):
+    """Scales the frame content by `factor` and centres it on a zeroed canvas of
+    the original size, to emulate a larger sensor-to-object distance than the
+    one the model was trained at. Frame shape is unchanged, so the detector's
+    grid and stride are unaffected -- but the boxes it predicts then live in
+    this canvas' coordinates and must be mapped back by BoxRescale."""
+
+    name = 'ShrinkCenter'
+
+    def __init__(self, **attr_dict):
+        super().__init__(attr_dict['SensorType'])
+        self.factor = attr_dict.pop('factor', 1.0)
+
+    @property
+    def factor(self):
+        return self._factor
+    @factor.setter
+    def factor(self, factor: float):
+        if not 0 < factor <= 1:                    # 1.0 = legal no-op
+            raise ValueError('factor must be in (0, 1]')
+        self._factor = float(factor)
+
+    def _process_frame(self, frame, idx, **kwargs):
+        return_dict = {}
+        return_dict.update(kwargs)
+        return_dict['frame'] = (frame if frame is None or self.factor == 1.0
+                                else shrink_and_center(frame, self.factor))
+        return_dict['idx'] = idx
+        return return_dict
+
+    def _process_avideo(self, video, **kwargs):
+        raise NotImplementedError('ShrinkCenter is inference-only -- applying it '
+                                  'to training data re-introduces the scale '
+                                  'mismatch it exists to correct.')
+        
+
     
     # def process(self,**kwargs)->cv2.htpa.DataFrame:
     #     '''
