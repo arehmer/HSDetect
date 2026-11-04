@@ -9,6 +9,9 @@ Created on Thu Jan 26 09:54:07 2023
 # import pickle as pkl
 # from pathlib import Path
 import cv2
+import pandas as pd
+
+from hspy.tparray import TPArray
 
 # from .gradient import  ConvolutionFilter
 # from hsdetect.cv.misc import pd_IoU 
@@ -23,8 +26,13 @@ def build_postprocessing_engine(**kwargs):
     name = kwargs.pop('name')
     if name == 'PostprocEngineNMS':
         return PostprocEngineNMS(**kwargs)
+    elif name == 'BoxRescale':
+        return BoxRescale(**kwargs)
+    else:
+        raise Exception('Preprocessing Engine ' + name + ' not known!')
 
-import ast       
+import ast    
+   
 def get_classes():
     with open(__file__, 'r') as f:
         tree = ast.parse(f.read(), filename=__file__)
@@ -32,7 +40,48 @@ def get_classes():
 
 class PostprocEngine(Engine):
     
-    pass
+    @property
+    def SensorType(self):
+        return self._SensorType
+    @SensorType.setter
+    def SensorType(self,SensorType:int):
+        self._SensorType = SensorType
+    
+    def save(self):
+        """
+        Overrides standard save method, which only stores attributes, but 
+        is not capable of storing objects which have a save() method of 
+        their own.
+
+        Returns
+        -------
+        None.
+
+        """
+        
+        attr_dict = {}
+        
+        for attr_name in dir(self):
+            # get the attribute *on the class*, not the instance
+            attr = getattr(self.__class__, attr_name, None)
+        
+            # check if it's a property
+            if isinstance(attr, property):
+                
+                # Retrieve the value of the property attr
+                attr_val = getattr(self, attr_name)
+                
+                # If the property has a save() method, save the return value of
+                # that method
+                if hasattr(attr_val, "save") and callable(attr_val.save):
+                    attr_dict[attr_name] = attr_val.save()
+                else:
+                    attr_dict[attr_name] = attr_val
+                
+        # Append name
+        attr_dict['name'] = self.name
+                
+        return attr_dict
 
 
 class PostprocEngineNMS(PostprocEngine):
@@ -66,40 +115,51 @@ class PostprocEngineNMS(PostprocEngine):
         '''
         
         return self.cv_postproc_engine.process(bbox_pred,label)
+
+
+def shrink_geometry(w: int, h: int, factor: float):
+    """Geometry realized by shrink_and_center(): the content size is rounded and
+    the offset floor-divided, so the per-axis scales differ from `factor` and
+    from each other. Both ShrinkCenter and BoxRescale must use THESE values."""
+    new_w = max(1, int(round(w * factor)))
+    new_h = max(1, int(round(h * factor)))
+    left  = (w - new_w) // 2
+    top   = (h - new_h) // 2
+    return left, top, new_w / w, new_h / h
     
-    def save(self):
-        '''
-        Returns all non-private an non-builtin attributes of this class
-        as a dictionary with the purpose of reloading this instance from the
-        attribute dictionary. 
+class BoxRescale(PostprocEngine):
+    """Maps annotations from ShrinkCenter's canvas coordinates back to sensor
+    coordinates. Must be configured with the SAME factor as ShrinkCenter."""
 
-        Returns
-        -------
-        None.
+    name = 'BoxRescale'
 
-        '''
-        
-        # Get all instance attributes 
-        attr_dict = { k:v for k,v in vars(self).items() \
-                     if not k.startswith('_') }
-        
-        # Throw out the svm_cpp as it cannot be pickled but will
-        # be initialized when calling self.__init__()
-        if 'cv_postproc_engine' in self.__dict__:
-            del attr_dict['cv_postproc_engine']
-        
-        # Get all class attributes
-        class_dict = {}
-        for attribute in PostprocEngineNMS.__dict__.keys():
-            # Check if it's a built-in type
-            if attribute[:2] != '__':
-                # Check if its a method
-                value = getattr(PostprocEngineNMS, attribute)
-                if not callable(value):
-                    # If not append to dict
-                    class_dict[attribute] = value
+    def __init__(self, **attr_dict):
+        self.SensorType = attr_dict['SensorType']          # property, for save()
+        self.factor = attr_dict.pop('factor', 1.0)         # property, for save()
+        self.drop_outside = attr_dict.pop('drop_outside', True)
+        self._tparray = TPArray(SensorType=self.SensorType)
 
-        # Concatenate both
-        attr_dict.update(class_dict)
-        
-        return attr_dict
+    def __call__(self, annotations: pd.DataFrame) -> pd.DataFrame:
+        w, h = self._tparray.width, self._tparray.height
+        left, top, sx, sy = shrink_geometry(w, h, self.factor)
+
+        annot = annotations.copy()
+        if len(annot) == 0 or self.factor == 1.0:
+            return annot                      # preserves columns and index name
+
+        if self.drop_outside:
+            # A detection whose centre lies in the zero border cannot be a real
+            # object -- it is a padding artifact. Filter BEFORE rescaling.
+            cx = (annot['xtl'] + annot['xbr']) / 2.0
+            cy = (annot['ytl'] + annot['ybr']) / 2.0
+            keep = (cx.between(left, left + round(w*self.factor)) &
+                    cy.between(top,  top  + round(h*self.factor)))
+            annot = annot.loc[keep]
+            if len(annot) == 0:
+                return annot
+
+        annot[['xtl','xbr']] = (annot[['xtl','xbr']] - left) / sx
+        annot[['ytl','ybr']] = (annot[['ytl','ybr']] - top)  / sy
+        annot['w'] = annot['w'] / sx
+        annot['h'] = annot['h'] / sy
+        return annot
