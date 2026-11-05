@@ -152,7 +152,7 @@ class InferenceEngine:
             return avideo
         
         else:
-            
+            frame = data
             return self.step(frame,
                              frame_idx,
                              **kwargs)

@@ -14,8 +14,8 @@ from hsdetect import build_engine
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-file_in = SCRIPT_DIR / 'models' / 'yolo' / 'inf_engine_params.dict'
-file_out = SCRIPT_DIR / 'models' / 'yolo_scaled' / 'inf_engine_params_scaled.dict'
+file_in = SCRIPT_DIR / 'models' / 'yolo_v1' / 'inf_engine_params.dict'
+file_out = SCRIPT_DIR / 'models' / 'yolo_v1_scaled' / 'inf_engine_params_scaled.dict'
 
 
 # %% Load inf_engine_params.dict
@@ -43,10 +43,12 @@ engine_pipeline.append(box_rescale_engine.save())
 
 # %% Also change dl_model path
 engine_pipeline[4]['dl_model'] = \
-    'C:/Users/Rehmer/Documents/GitHub/HSDetect/demos/live/multiprocessed/models/yolo_scaled/YOLOv2Tiny8X.keras'
+    'C:/Users/Rehmer/Documents/GitHub/HSDetect/demos/live/multiprocessed/models/yolo_v1_scaled/YOLOv2Tiny8X.keras'
 
 # %% Write pipeline back to parameter dict
 engine_params_dict['engines'] = engine_pipeline
+
+build_engine(**engine_params_dict)
 
 # %% Store the updated parameter dictionary
 pkl.dump(engine_params_dict,
