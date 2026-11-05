@@ -620,10 +620,11 @@ class AnnotatedVideo:
                           file)
         
     def to_yolo_dataset(self,
-                         anchors: List[tuple[float, float]],
-                         grid_shape: Tuple[int, int],
-                         num_classes: int = 1,
-                         class_column: str = "label"):
+                        anchors: List[tuple[float, float]],
+                        grid_shape: Tuple[int, int],
+                        num_classes: int = 1,
+                        class_column: str = "label",
+                        include_fringes : bool = True):
         """
         Build a tf.data.Dataset of (image, y_true) pairs from this video's
         frames, ready to feed to a YOLOv2-style detector.
@@ -657,6 +658,9 @@ class AnnotatedVideo:
         class_column : str
             Column in each frame's annotations holding the integer class
             label. Defaults to 'label', per AnnotatedFrame.cv_datatypes.
+        include_fringes : bool
+            If false, all annotations that coincide with any image border are 
+            deleted. The corresponding frame is deleted as well.
 
         Returns
         -------
@@ -677,8 +681,40 @@ class AnnotatedVideo:
         if not isinstance(sequence_id,int):
             raise TypeError(f'sequence_id is {type(sequence_id)} instead of {int}')
             
+        # Frames to construct tf.Data.DataSets from.
+        tf_frames = self.frames
+        
+        tf_frames = []
+        
+        for aframe in self.frames:
+            # Get annotations belonging to aframe
+            annot = aframe.annotations
+            
+            # Append if no anntotations and continue
+            if len(annot) == 0:
+                tf_frames.append(aframe)
+                continue
+            
+            # Delete rows which are set to "outside"
+            aframe.annotations = annot.drop(annot[annot.outside == True].index)
+            
+            # Check if any annotations hugs any border
+            if include_fringes is not True:
+                h,w = aframe.image.shape 
+                
+                if (annot[['xtl','ytl','xbr','ybr']] == [0,0,w,h]).any(axis=None):
+                    # if so, do not include that frame in frames_filt
+                    continue
+                else:
+                    tf_frames.append(aframe)
+                    
+        # Calculate and print the percentage of excluded frames
+        perc_excluded = (1 - len(tf_frames) / len(self.frames))*100
+        print(f'Exluded {perc_excluded:.2f} % when converting task {sequence_id} to tf.Data.DataSet')
+                
+        # Build a dataset from tf_frames and return            
         return build_video_dataset(
-            frames=self.frames,
+            frames=tf_frames,
             anchors=anchors,
             grid_shape=grid_shape,
             num_classes=num_classes,
@@ -711,8 +747,6 @@ class AnnotatedVideo:
         return pd.DataFrame(data = frame_array,
                             columns = ['pix'+str(p) for p in range(frame_array.shape[1])],
                             index = pd_index)
-    
-        
     
     def get_RoIs(self):
         
