@@ -696,8 +696,10 @@ class AnnotatedVideo:
                 continue
             
             # Delete rows which are set to "outside"
-            aframe.annotations = annot.drop(annot[annot.outside == True].index)
-            
+            try:
+                aframe._annotations = annot.drop(annot[annot.outside == True].index)
+            except:
+                pass
             # Check if any annotations hugs any border
             if include_fringes is not True:
                 h,w = aframe.image.shape 
