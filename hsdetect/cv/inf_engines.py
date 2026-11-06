@@ -118,7 +118,159 @@ class InferenceEngine:
         
         # Build or rebuild the inference pipeline
         self._build_inference_pipeline()
-        
+
+    @property
+    def engine_names(self) -> list:
+        """Names of this pipeline's engines, in the order they are executed.
+
+        The names are the engines' `name` class attributes, which is also the
+        key `Engine.save()` stores them under -- so the same name identifies an
+        engine both in a built pipeline and in a saved parameter dict.
+        """
+        return list(self._inference_pipeline.keys())
+
+    def get_engine(self, name: str) -> Engine:
+        """Return the engine called `name`.
+
+        Use this instead of indexing `self.engines`: a positional index
+        silently returns the WRONG engine as soon as an engine is inserted into
+        or removed from the chain, whereas a wrong name raises here, naming
+        every engine the pipeline actually has.
+
+        Parameters
+        ----------
+        name : str
+            An engine's `name`, e.g. 'BackgroundSub' or
+            'YOLO_EnDecode_Engine'. See `engine_names`.
+
+        Raises
+        ------
+        TypeError
+            If `name` is not a string. Deliberately not an index: this method
+            exists to replace positional access, and silently accepting an int
+            would defeat that.
+        KeyError
+            If no engine of that name is in the pipeline. The message lists
+            `engine_names`, since the usual cause is a renamed or reordered
+            chain.
+        """
+        if not isinstance(name, str):
+            raise TypeError(f'Engine name must be {str}, received '
+                            f'{type(name)}. Engines are looked up by name, '
+                            f'not by position -- see self.engine_names.')
+
+        try:
+            return self._inference_pipeline[name]
+        except KeyError:
+            # from None: the bare KeyError('BackgroundSub') of the dict lookup
+            # adds nothing to the message built here.
+            raise KeyError(f"No engine named '{name}' in this pipeline. "
+                           f"Available engines, in execution order: "
+                           f"{self.engine_names}.") from None
+
+    def __getitem__(self, name: str) -> Engine:
+        """`inf_engine['BackgroundSub']` -- shorthand for get_engine().
+
+        Note that this does NOT make the pipeline iterable: get_engine()
+        rejects the integer indices Python's legacy iteration protocol would
+        pass, with the same TypeError iterating this object raised before this
+        method existed. Iterate `self.engines` instead.
+        """
+        return self.get_engine(name)
+
+    @staticmethod
+    def get_engine_params(params: dict, name: str) -> dict:
+        """Look an engine up by name in a SAVED parameter dict, i.e. before
+        any engine has been built.
+
+        The counterpart to get_engine(), for the other side of the pickle.
+        `Engine.name` is a class attribute and `save()` stores it under the
+        'name' key, so one and the same name identifies an engine in a built
+        pipeline and in `InferenceEngine.save()`'s output -- which is what lets
+        a caller drop positional indices into params['engines'] entirely.
+
+        The entry is returned AS IS, not copied, so that writing to it writes
+        through to `params`:
+
+            InferenceEngine.get_engine_params(params,'DLEngine')['dl_model']                 = remapped_path
+            inf_engine = build_engine(**params)
+
+        That in-place edit is the whole point -- handing back a copy would turn
+        such a remap into a silent no-op, which is a worse failure than the
+        positional indexing this replaces.
+
+        Parameters
+        ----------
+        params : dict
+            A dict as produced by `InferenceEngine.save()`, i.e. carrying an
+            'engines' list of per-engine parameter dicts. The whole dict, not
+            its 'engines' value, so that callers never touch the structure.
+        name : str
+            The engine's `name`, e.g. 'DLEngine'.
+
+        Returns
+        -------
+        dict
+            That engine's parameter dict, still part of `params`.
+
+        Raises
+        ------
+        TypeError
+            If `params` is not a dict, `name` is not a string, or the entry
+            found is an already-built Engine rather than a parameter dict (use
+            get_engine() on the built pipeline for that).
+        KeyError
+            If `params` has no 'engines' key, or no engine of that name is in
+            it -- the message lists the names that are.
+        ValueError
+            If several entries carry that name, since returning the first
+            would silently hide the others.
+        """
+        if not isinstance(name, str):
+            raise TypeError(f'Engine name must be {str}, received '
+                            f'{type(name)}. Engines are looked up by name, '
+                            'not by position.')
+
+        if not isinstance(params, dict):
+            raise TypeError(f'Expected a saved parameter dict ({dict}), '
+                            f'received {type(params)}.')
+
+        try:
+            engines = params['engines']
+        except KeyError:
+            raise KeyError("Parameter dict carries no 'engines' key, so it is "
+                           'not an InferenceEngine.save() result. Its keys '
+                           f'are: {sorted(params.keys())}.') from None
+
+        # Entries are parameter dicts after save(), but build_engine() also
+        # accepts already-built Engines in that list, so read the name from
+        # either and let the type check below produce the better message.
+        def _name_of(entry):
+            if isinstance(entry,dict):
+                return entry.get('name')
+            return getattr(entry,'name',None)
+
+        matches = [entry for entry in engines if _name_of(entry) == name]
+
+        if not matches:
+            raise KeyError(f"No engine named '{name}' in this parameter dict. "
+                           'Engines it carries, in execution order: '
+                           f'{[_name_of(entry) for entry in engines]}.')
+
+        if len(matches) > 1:
+            raise ValueError(f"{len(matches)} engines named '{name}' in this "
+                             'parameter dict -- a name has to identify one '
+                             'engine, since the built pipeline is keyed by '
+                             'it. Give them distinct names.')
+
+        if not isinstance(matches[0],dict):
+            raise TypeError(f"Engine '{name}' in this parameter dict is an "
+                            f'already-built {type(matches[0])}, not a '
+                            'parameter dict. Build the pipeline and use '
+                            'InferenceEngine.get_engine() instead.')
+
+        return matches[0]
+
     def __call__(self, data, frame_idx = None, conf_min = 0.9, **kwargs):
 
         # Check type of passed data
