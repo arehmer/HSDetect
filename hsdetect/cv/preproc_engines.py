@@ -14,6 +14,9 @@ import pandas as pd
 import warnings
 
 from hsdetect.annot.annot import AnnotatedVideo, AnnotatedFrame
+from hsdetect.netinput import (stack_channels,
+                              estimate_scene_level,
+                              subtract_scene_level)
 from hspy.tparray import TPArray
 
 from hsdetect import Engine
@@ -26,6 +29,8 @@ def build_preprocessing_engine(**kwargs):
         return PreprocEngAWA(**kwargs)
     elif name == 'ZeroCorners':
         return ZeroCorners(**kwargs)
+    elif name == 'MedianSub':
+        return MedianSub(**kwargs)
     elif name == 'BackgroundSub':
         return BackgroundSub(**kwargs)
     elif name == 'ShrinkCenter':
@@ -278,6 +283,7 @@ class BackgroundSub(PreprocEngine):
         self.bg = attr_dict.pop('bg',None)
         self.bg_mask = attr_dict.pop('bg_mask',None)
         self.box_pad = attr_dict.pop('box_pad',0)
+        self.stack_raw = attr_dict.pop('stack_raw',False)
         
         # NOTE: previously `htpa = TPArray(...)` was a local variable and
         # discarded -- update_bg() needs the sensor's (w, h), so this is
@@ -348,6 +354,14 @@ class BackgroundSub(PreprocEngine):
     @box_pad.setter
     def box_pad(self,box_pad:int):
         self._box_pad = box_pad       
+
+    @property
+    def stack_raw(self):
+        return self._stack_raw
+
+    @stack_raw.setter
+    def stack_raw(self,stack_raw:bool):
+        self._stack_raw = bool(stack_raw)
 
     # ---- Step 1: background construction -------------------------------
 
@@ -541,6 +555,27 @@ class BackgroundSub(PreprocEngine):
         
         backsub_frame = self.subtract(frame)
         
+        # Stack the background-subtracted frame (channel 0) and the frame that
+        # entered the subtraction (channel 1) into a single (H,W,2) array, and
+        # hand that on as 'frame'. The engines downstream of this one
+        # (ZeroCorners, ShrinkCenter) are purely spatial and channel-agnostic,
+        # so carrying the second channel inside 'frame' -- rather than as an
+        # extra dict key, which PreprocEngine.process() would drop anyway --
+        # is what makes them apply their geometry to BOTH channels identically.
+        # Returns backsub_frame unchanged (incl. None, before the background is
+        # established) if there is no raw channel to add; otherwise float32.
+        # Channel 1 is still in absolute sensor units at this point: removing
+        # its scene level is the MedianSub engine's job, and MedianSub has to
+        # come next in the chain -- before anything resamples the frame. See
+        # hsdetect.netinput for why.
+        #
+        # Gated by stack_raw (default False) so that a pipeline built for a
+        # single-channel model -- including every engine dict saved before
+        # the second channel existed, which carries no stack_raw key and so
+        # falls back to the default -- keeps emitting a 2-D frame.
+        if self.stack_raw:
+            backsub_frame = stack_channels(backsub_frame, frame)
+        
         # Prepare dictionary for return
         return_dict = {}    
         return_dict.update(kwargs)                # keep passed kwargs
@@ -578,6 +613,19 @@ class BackgroundSub(PreprocEngine):
             frame_cp.metadata['no_cv'] = False
         
         frame_cp.image = backsub_frame
+        
+        # Carry the frame that entered the subtraction as a second image, to be
+        # used as the detector's second input channel. Kept SEPARATE from
+        # .image (rather than stacked, as the live path does above) so that
+        # .image stays 2-D and to_png(), play(), frames_as_pdDataFrame() and
+        # AnnotatedVideoPlayer keep working on the stored video. MedianSub
+        # removes .image2's scene level further down the chain, and the two are
+        # stacked later, in video_dataset.build_frame_targets(). Gated by
+        # stack_raw exactly like the live path above: with it off the stored
+        # video carries no raw channel, and build_frame_targets() keeps
+        # building single-channel input from it.
+        if self.stack_raw:
+            frame_cp.image2 = frame_img
         
         # Prepare dictionary for return
         return_dict = {'bg' : self.bg,
@@ -658,6 +706,156 @@ class BackgroundSub(PreprocEngine):
 
 #     return canvas    
 
+class MedianSub(PreprocEngine):
+    """Removes the scene's own temperature level from the raw channel.
+
+    The raw channel -- channel 1 of the detector's input -- carries absolute
+    sensor values at ~3000 dK. That DC level is not information: it is what
+    turns the backbone's padding="same" borders and ZeroCorners' mask boundary
+    into high-contrast steps, measured at ~55x the contrast of a person.
+    Subtracting the frame's own scene level, estimated as the median of its
+    valid pixels, makes 0 mean "at the temperature of the scene" -- which is
+    both what zero padding then extends the frame with and what the corners
+    zeroed by ZeroCorners read as.
+
+    The level is estimated per frame rather than taken as a fixed constant so
+    that a model trained at one ambient temperature still sees the same
+    channel 1 at another. See hsdetect.netinput for the measurements behind
+    all of this.
+
+    This is an engine, rather than part of BackgroundSub or of the dataset
+    builder, so that the subtraction happens inside the chain that the training
+    script and live inference both execute -- there is then no second code path
+    to keep in sync, and no need to carry the offset in metadata.
+
+    The raw channel lives in a different place in each of the pipeline's two
+    representations, so this engine corrects whichever one it is handed, and
+    never touches the background-subtracted channel:
+
+      * dict (live)    -- channel 1 of the (H, W, 2) frame BackgroundSub
+                          stacked; channel 0 is left alone.
+      * AnnotatedFrame -- .image2; .image is left alone.
+
+    A single-channel frame carries no raw channel and is passed through
+    unchanged, so a single-channel pipeline behaves as if this engine were not
+    in it.
+
+    Must run before any engine that resamples the frame spatially, i.e. before
+    ShrinkCenter.
+    """
+
+    name = 'MedianSub'
+
+    def __init__(self,**attr_dict):
+
+        super().__init__(attr_dict['SensorType'])
+
+        self._tparray = TPArray(SensorType = self.SensorType)
+
+    def _scene_level(self,frame_raw:np.ndarray):
+        """Scene level of a raw (H,W) channel, over the detection mask.
+
+        The mask matters because this engine sits at a different point relative
+        to ZeroCorners in the training chain than in the live one, so the dead
+        corners are already zero in one case and still hold sensor values
+        (~3030..3055 dK, i.e. above the scene) in the other. Estimating over
+        the mask only makes the result independent of that.
+        """
+        mask = getattr(self._tparray,'_detection_mask',None)
+
+        if mask is not None:
+            mask = np.asarray(mask).astype(bool)
+
+        return estimate_scene_level(frame_raw,mask)
+
+    def _process_frame(self,
+                       frame:np.ndarray,
+                       idx:int,
+                       **kwargs) -> dict:
+
+        if frame is not None and frame.ndim == 3 and frame.shape[-1] >= 2:
+
+            # Copy before writing channel 1 in place -- upstream engines may
+            # still hold a reference to the array that was passed in.
+            frame = np.asarray(frame,dtype=np.float32).copy()
+
+            frame[...,1] = subtract_scene_level(frame[...,1],
+                                                self._scene_level(frame[...,1]))
+
+        # Prepare dictionary for return
+        return_dict = {}
+        return_dict.update(kwargs)          # keep passed kwargs
+        return_dict['frame'] = frame
+        return_dict['idx'] = idx
+
+        return return_dict
+
+    def _process_aframe(self,
+                        frame:AnnotatedFrame,
+                        **kwargs:dict) -> dict:
+
+        # Copy given AnnotatedFrame to not change original
+        frame_cp = copy.deepcopy(frame)
+
+        # getattr(), not frame_cp.image2: AnnotatedFrames pickled before that
+        # attribute existed carry no 'image2' in their __dict__ and unpickling
+        # does not call __init__.
+        img_raw = getattr(frame_cp,'image2',None)
+
+        if img_raw is not None:
+            frame_cp.image2 = subtract_scene_level(img_raw,
+                                                   self._scene_level(img_raw))
+
+        # Prepare dictionary for return
+        return_dict = {'annot_frame' : frame_cp}
+
+        return return_dict
+
+    def process(self,data,**kwargs):
+        """Adds the AnnotatedFrame branch, which PreprocEngine.process() --
+        whose other two branches are used unchanged -- does not handle."""
+        if isinstance(data,AnnotatedFrame):
+            return self._process_aframe(data,**kwargs)
+
+        return super().process(data,**kwargs)
+
+    def _process_avideo(self,
+                        video:AnnotatedVideo,
+                        **kwargs):
+
+        # Check if inputs have proper type
+        if not isinstance(video,AnnotatedVideo):
+            raise TypeError('video is not type AnnotatedVideo')
+
+        # Copy the whole video instead of rebuilding it from the processed
+        # frames: only .image2 changes, while .image, the annotations, the
+        # per-frame metadata BackgroundSub wrote ('no_cv') and the video-level
+        # metadata all have to survive untouched.
+        video_cp = copy.deepcopy(video)
+
+        for frame in video_cp:
+
+            img_raw = getattr(frame,'image2',None)
+
+            if img_raw is None:
+                continue
+
+            frame.image2 = subtract_scene_level(img_raw,
+                                                self._scene_level(img_raw))
+
+        # After processing a whole video, reset any memory components
+        self.reset()
+
+        # In the end return an annotated video
+        return video_cp
+
+    def reset(self):
+        """
+        MedianSub has no memory components to reset
+        """
+        return None
+
+
 class ZeroCorners(PreprocEngine):
         
     name = 'ZeroCorners'
@@ -682,7 +880,15 @@ class ZeroCorners(PreprocEngine):
             
             return return_dict
         
-        frame = frame.astype(np.uint16)
+        if frame.ndim == 2:
+            # Unchanged behaviour for a single-channel frame: cast (which also
+            # makes the defensive copy the in-place masking below relies on).
+            frame = frame.astype(np.uint16)
+        else:
+            # From BackgroundSub on, the frame may carry a second, already
+            # normalized channel (see hsdetect.netinput) and is then float32.
+            # Casting that to uint16 would truncate it, so only copy.
+            frame = frame.copy()
         
         # Obtain detection mask [0,1] and convert to boolean
         detection_mask = self._tparray._detection_mask.astype(bool)

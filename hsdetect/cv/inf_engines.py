@@ -360,6 +360,10 @@ class InferenceEngine:
         
         # Create an input/output mapping from the engines' names and their order
         self._determineIOMapping()
+
+        # Fail here, rather than once a frame reaches the model, if the
+        # preprocessing chain and the model disagree on the channel count
+        self._check_input_channels()
         
         # Check which engines need updating after each step
         # engines_requiring_update = []
@@ -371,6 +375,43 @@ class InferenceEngine:
         # self._engines_requiring_update = engines_requiring_update
                     
         
+    def _check_input_channels(self) -> None:
+        """Check that the preprocessing chain emits as many channels as the
+        model was built for.
+
+        Only BackgroundSub changes the channel count -- it stacks the frame
+        that entered the subtraction as a second channel when its stack_raw
+        flag is set -- so the number is known without running a frame through
+        the pipeline. Without this check a mismatch shows up only once a frame
+        reaches the model, as a per-frame exception raised inside the first
+        convolution and swallowed by whatever is driving the pipeline.
+        """
+        dl_engine = self._inference_pipeline.get('DLEngine')
+
+        if dl_engine is None:
+            return
+
+        model_shape = getattr(getattr(dl_engine,'dl_model',None),
+                              'input_shape',None)
+
+        if model_shape is None:
+            return
+
+        bg_engine = self._inference_pipeline.get('BackgroundSub')
+
+        stack_raw = bool(getattr(bg_engine,'stack_raw',False))
+        frame_channels = 2 if stack_raw else 1
+        model_channels = model_shape[-1]
+
+        if frame_channels != model_channels:
+            raise ValueError(
+                'Channel mismatch between preprocessing and model: the '
+                f'chain emits {frame_channels} channel(s) '
+                f'(BackgroundSub.stack_raw = {stack_raw}), but the model was '
+                f'built for {model_channels} (input_shape '
+                f'{tuple(model_shape)}). Set stack_raw and the model '
+                'input_shape consistently.')
+
     def _determineIOMapping(self) -> None:
         
         # Dictionary that maps engine.name -> engine input 

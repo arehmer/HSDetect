@@ -16,6 +16,13 @@ with xtl/ytl/xbr/ybr, and optionally a class label column) works.
 
 Assumes images are ALREADY background-subtracted (per request) -- no
 background handling happens here.
+
+A frame may additionally carry `.image2`, the frame as it entered background
+subtraction (set by BackgroundSub._process_aframe(), with its scene level
+removed further down the preprocessing chain by MedianSub). When present it
+becomes the network input's second channel. The stacking is done by
+hsdetect.netinput, which DLEngine uses as well, so the training-time and
+inference-time input arrays are formed by identical code.
 """
 
 from typing import List, Tuple, Sequence, Optional
@@ -26,6 +33,8 @@ import tensorflow as tf
 
 from hsod.dl.targets import xyxy_to_center, assign_boxes, encode_box
 
+from hsdetect.netinput import make_net_input, stack_channels
+
 
 def build_frame_targets(
     image: np.ndarray,
@@ -35,6 +44,7 @@ def build_frame_targets(
     grid_w: int,
     num_classes: int = 1,
     class_column: str = "label",
+    image2: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Build the (image, y_true) pair for a single frame.
 
@@ -59,20 +69,31 @@ def build_frame_targets(
         matching loss.py's convention).
     class_column : str
         Column in `annotations` holding the integer class label, if any.
-    
+    image2 : np.ndarray or None
+        Optional second image of the same (H, W) shape -- the frame as it
+        entered background subtraction, i.e. `AnnotatedFrame.image2`, already
+        corrected by the MedianSub engine. If given, it becomes the network
+        input's channel 1; if None, the input stays single-channel and this
+        function behaves exactly as it did before.
 
     Returns
     -------
-    image_arr : np.ndarray, shape (H, W, 1), float32
+    image_arr : np.ndarray, shape (H, W, 1) or (H, W, 2), float32
     y_true : np.ndarray, shape (grid_h, grid_w, num_anchors, 5 + num_classes), float32
     """
     num_anchors = anchors.shape[0]
     depth = 5 + num_classes
     y_true = np.zeros((grid_h, grid_w, num_anchors, depth), dtype=np.float32)
 
-    image_arr = np.asarray(image, dtype=np.float32)
-    if image_arr.ndim == 2:
-        image_arr = image_arr[..., np.newaxis]
+    # Stack the optional raw channel on and form the input array. Both helpers
+    # are shared with the inference pipeline -- stack_channels() with
+    # BackgroundSub, make_net_input() with DLEngine.__call__() -- so the array
+    # built here and the one built at inference time are formed by exactly the
+    # same code. make_net_input() also does the (H,W) -> (H,W,1) promotion this
+    # used to do inline. Note that `image2` arrives already scene-level
+    # corrected: that is MedianSub's job, inside the engine chain, so that it
+    # cannot drift between the training and inference paths.
+    image_arr = make_net_input(stack_channels(image, image2))
     img_h, img_w = image_arr.shape[0], image_arr.shape[1]
 
     if annotations is not None and len(annotations) > 0:
@@ -130,7 +151,9 @@ def build_video_dataset(
     Parameters
     ----------
     frames : sequence of objects exposing `.image` and `.annotations`
-        Typically `AnnotatedVideo.frames` (a list of `AnnotatedFrame`).
+        Typically `AnnotatedVideo.frames` (a list of `AnnotatedFrame`). An
+        `.image2` attribute, if present and not None, is used as the network
+        input's second channel (see build_frame_targets()).
     anchors : list of (w, h) tuples
         Anchor boxes, pixel units, shared across the whole video (and
         typically across the whole training set -- see note in the
@@ -156,8 +179,8 @@ def build_video_dataset(
     tf.data.Dataset
         Yields (image, y_true) pairs (or (image, y_true, sequence_id)
         triples), one per frame, in the same order as `frames`. Images
-        have shape (H, W, 1); y_true has shape
-        (grid_h, grid_w, num_anchors, 5 + num_classes).
+        have shape (H, W, 1), or (H, W, 2) if the frames carry an `.image2`;
+        y_true has shape (grid_h, grid_w, num_anchors, 5 + num_classes).
     """
     if len(frames) == 0:
         raise ValueError("build_video_dataset() received an empty frame sequence.")
@@ -182,6 +205,9 @@ def build_video_dataset(
             grid_w=grid_w,
             num_classes=num_classes,
             class_column=class_column,
+            # getattr(), not frame.image2: this module duck-types its frames,
+            # so a frame-like object without the attribute must still work.
+            image2=getattr(frame, 'image2', None),
         )
         images_list.append(image_arr)
         y_true_list.append(y_true)
