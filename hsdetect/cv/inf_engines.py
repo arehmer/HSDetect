@@ -33,6 +33,9 @@ import numpy as np
 import pandas as pd
 
 import logging
+import re
+import sys
+from pathlib import Path
 
 
 try:
@@ -69,6 +72,53 @@ def get_classes():
     with open(__file__, 'r') as f:
         tree = ast.parse(f.read(), filename=__file__)
     return [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+
+# ---- platform path translation ---------------------------------------------
+# A saved pipeline carries the filesystem path of the Keras model, written by
+# whichever machine last called save(): Windows stores 'H:/dir/model.keras',
+# a WSL/Linux mount of that same drive stores '/mnt/H/dir/model.keras'. A dict
+# written on one platform therefore cannot be built on the other without
+# translation -- InferenceEngine.remap_paths() does that, and the two patterns
+# plus the single-path helper live out here so they are testable on their own.
+
+_WIN_DRIVE = re.compile(r'^([A-Za-z]):[/\\]')
+_WSL_MOUNT = re.compile(r'^/mnt/([A-Za-z])(?=/|$)')
+
+
+def _engine_param_name(entry):
+    """Name of one entry of a params['engines'] list, which is a parameter
+    dict after save(), but may be an already-built Engine, since build_engine()
+    accepts either."""
+    if isinstance(entry,dict):
+        return entry.get('name')
+    return getattr(entry,'name',None)
+
+
+def _remap_path(path: str, to_windows: bool) -> str:
+    """Translate one path between 'X:/...' and '/mnt/X/...' form.
+
+    Returns `path` unchanged when it is not in the other platform's form, so
+    applying this twice, or to an already-correct path, is a no-op -- which is
+    what makes remap_paths() idempotent.
+
+    The drive letter's case is preserved on the way to /mnt, because mount
+    points are case-sensitive and this project's is '/mnt/H', and upper-cased
+    on the way to a drive spec, where Windows ignores case.
+
+    Note that '/mnt/home/...' is not a drive: the pattern requires the
+    component after /mnt to be a single letter.
+    """
+    if to_windows:
+        match = _WSL_MOUNT.match(path)
+        if match is None:
+            return path
+        return match.group(1).upper() + ':/' + path[match.end():].lstrip('/')
+
+    match = _WIN_DRIVE.match(path)
+    if match is None:
+        return path
+    return '/mnt/' + match.group(1) + '/' + path[match.end():].replace(chr(92),'/')
+
 
 class InferenceEngine:
     """Wraps a trained YOLOv2Tiny model and any number of pre- or post-
@@ -178,6 +228,106 @@ class InferenceEngine:
         """
         return self.get_engine(name)
 
+    # Engine parameters that hold a filesystem path, and therefore have to be
+    # translated when a saved pipeline moves between Windows and Linux. An
+    # engine that is not listed here is left alone; add an entry when another
+    # engine starts carrying a path.
+    PATH_PARAMS = {'DLEngine': ('dl_model',)}
+
+    @classmethod
+    def remap_paths(cls, params: dict, platform: str = None) -> dict:
+        """Translate the paths in a saved parameter dict to the platform this
+        process is running on, IN PLACE, returning that same dict.
+
+        Call it between loading a dict and building from it:
+
+            params = pkl.load(open(path,'rb'))
+            inf_engine = build_engine(**InferenceEngine.remap_paths(params))
+
+        Which parameters are paths is declared once, by PATH_PARAMS, so no
+        caller has to name them or index params['engines'] -- which is the
+        point: hand-rolled copies of this translation tend to cover one
+        direction and silently no-op in the other.
+
+        Because _remap_path() leaves a path that is already in the running
+        platform's form untouched, this is idempotent and safe to call on a
+        freshly saved dict.
+
+        An engine named in PATH_PARAMS but absent from `params` is skipped
+        rather than raised on, since the same call has to work for a chain
+        without a DLEngine. So is an entry that is an already-built Engine
+        rather than a parameter dict: its model is loaded already, and there
+        is no path left to translate.
+
+        A remapped path that does not exist is logged as a warning rather than
+        raised on, because a dict may legitimately be prepared for another
+        machine -- but it is the usual sign that the drive is not mounted
+        where this expects it.
+
+        Parameters
+        ----------
+        params : dict
+            An `InferenceEngine.save()` result. Mutated in place.
+        platform : str or None
+            The platform to translate TO, spelled as `sys.platform` does;
+            anything starting with 'win' counts as Windows. Defaults to this
+            process's own platform. Pass it to prepare a dict for the other
+            platform, or to test.
+
+        Returns
+        -------
+        dict
+            `params` itself, so the call can wrap a load.
+        """
+        if platform is None:
+            platform = sys.platform
+
+        to_windows = platform.startswith('win')
+
+        # Validated here, once, rather than relying on get_engine_params()
+        # below -- whose KeyError this method deliberately treats as "that
+        # engine is not in this pipeline".
+        if not isinstance(params,dict):
+            raise TypeError(f'Expected a saved parameter dict ({dict}), '
+                            f'received {type(params)}.')
+
+        if 'engines' not in params:
+            raise KeyError("Parameter dict carries no 'engines' key, so it is "
+                           'not an InferenceEngine.save() result. Its keys '
+                           f'are: {sorted(params.keys())}.')
+
+        present = {_engine_param_name(entry) for entry in params['engines']
+                   if isinstance(entry,dict)}
+
+        for engine_name, keys in cls.PATH_PARAMS.items():
+
+            if engine_name not in present:
+                continue
+
+            engine_params = cls.get_engine_params(params,engine_name)
+
+            for key in keys:
+
+                path = engine_params.get(key)
+
+                # Not every pipeline carries a path here: dl_model is None
+                # before a model is set, and may be a live keras model.
+                if not isinstance(path,str):
+                    continue
+
+                remapped = _remap_path(path,to_windows)
+
+                if remapped != path:
+                    engine_params[key] = remapped
+                    logger.info("Remapped %s.%s for platform '%s': %s -> %s",
+                                engine_name,key,platform,path,remapped)
+
+                if not Path(engine_params[key]).exists():
+                    logger.warning('%s.%s does not exist on this platform: %s',
+                                   engine_name,key,engine_params[key])
+
+        return params
+
     @staticmethod
     def get_engine_params(params: dict, name: str) -> dict:
         """Look an engine up by name in a SAVED parameter dict, i.e. before
@@ -243,19 +393,16 @@ class InferenceEngine:
                            f'are: {sorted(params.keys())}.') from None
 
         # Entries are parameter dicts after save(), but build_engine() also
-        # accepts already-built Engines in that list, so read the name from
-        # either and let the type check below produce the better message.
-        def _name_of(entry):
-            if isinstance(entry,dict):
-                return entry.get('name')
-            return getattr(entry,'name',None)
-
-        matches = [entry for entry in engines if _name_of(entry) == name]
+        # accepts already-built Engines in that list, so _engine_param_name()
+        # reads the name off either and the type check below produces the
+        # better message.
+        matches = [entry for entry in engines
+                   if _engine_param_name(entry) == name]
 
         if not matches:
             raise KeyError(f"No engine named '{name}' in this parameter dict. "
                            'Engines it carries, in execution order: '
-                           f'{[_name_of(entry) for entry in engines]}.')
+                           f'{[_engine_param_name(entry) for entry in engines]}.')
 
         if len(matches) > 1:
             raise ValueError(f"{len(matches)} engines named '{name}' in this "
