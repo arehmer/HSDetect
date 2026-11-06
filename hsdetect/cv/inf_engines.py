@@ -281,7 +281,7 @@ class InferenceEngine:
             update_annotations = inference['YOLO_EnDecode_Engine']
             
     
-        update_frame = inference['PreprocEngAWA']['frame']
+        update_frame = inference['ZeroCorners']['frame']
     
         self._inference_pipeline['BackgroundSub'].update_bg(update_frame,
                                                             update_annotations)
