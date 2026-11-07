@@ -177,15 +177,28 @@ class AnnotatedFrame:
                     'IoU_max':'float64','IoU_idxmax':'int32',
                     'detector_idx':'int32','image_id':'int32'}
     
+    # Optional second image, carried alongside self.image as an additional
+    # input channel for the detector (see hsdetect.dl.netinput). Declared at
+    # class level on purpose: AnnotatedFrames pickled before this attribute
+    # existed have no 'image2' in their __dict__, and unpickling does not call
+    # __init__ -- so the class attribute is what makes frame.image2 resolve to
+    # None on them instead of raising AttributeError.
+    image2 = None
+    
     def __init__(self,
                  index:int,
                  image:np.ndarray=None, 
                  annotations:cv2.htpa.DataFrame=None,
                  mask:np.ndarray=None,
-                 metadata=None):
+                 metadata=None,
+                 image2:np.ndarray=None):
         
         """
         metadata: optional dict for frame-level info (e.g., 'no_cv')
+        image2: optional second image of the same shape as `image`, used as a
+            second network input channel. Keyword-only in practice -- it is
+            last in the signature so that existing positional calls
+            AnnotatedFrame(index, image, annotations) are unaffected.
         """
         
         # Single-frame mode
@@ -193,6 +206,7 @@ class AnnotatedFrame:
         self.index = index
         self.pyramid = None
         self.mask = mask
+        self.image2 = image2
         
         self.metadata = metadata if metadata is not None else {}
         

@@ -5,6 +5,7 @@ import numpy as np
 
 from hspy.tparray import TPArray
 from hsdetect import Engine
+from hsdetect.netinput import make_net_input
 
 IS_ENGINE_MODULE = True
 
@@ -67,8 +68,16 @@ class DLEngine(Engine):
         if frame is None:
             return None
         else:
-            yolo_shape = (1,) + frame.shape + (1,)
-            frame = frame.reshape(yolo_shape).astype(np.float32)
+            # make_net_input() casts to float32 and promotes a 2-D frame to
+            # (H,W,1). It is the same function
+            # video_dataset.build_frame_targets() uses, so the array fed to the
+            # model here is formed exactly as the training data was. A second
+            # channel, if any, arrives already stacked and normalized from
+            # BackgroundSub. Note the batch axis is added by indexing, NOT by the
+            # previous reshape((1,) + frame.shape + (1,)): that hardcoded a
+            # trailing channel axis of 1 and produced a 5-D tensor as soon as
+            # the frame carried two channels.
+            frame = make_net_input(frame)[np.newaxis, ...]
             return self.dl_model(frame)
 
 

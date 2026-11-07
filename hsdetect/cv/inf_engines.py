@@ -33,6 +33,9 @@ import numpy as np
 import pandas as pd
 
 import logging
+import re
+import sys
+from pathlib import Path
 
 
 try:
@@ -69,6 +72,53 @@ def get_classes():
     with open(__file__, 'r') as f:
         tree = ast.parse(f.read(), filename=__file__)
     return [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+
+# ---- platform path translation ---------------------------------------------
+# A saved pipeline carries the filesystem path of the Keras model, written by
+# whichever machine last called save(): Windows stores 'H:/dir/model.keras',
+# a WSL/Linux mount of that same drive stores '/mnt/H/dir/model.keras'. A dict
+# written on one platform therefore cannot be built on the other without
+# translation -- InferenceEngine.remap_paths() does that, and the two patterns
+# plus the single-path helper live out here so they are testable on their own.
+
+_WIN_DRIVE = re.compile(r'^([A-Za-z]):[/\\]')
+_WSL_MOUNT = re.compile(r'^/mnt/([A-Za-z])(?=/|$)')
+
+
+def _engine_param_name(entry):
+    """Name of one entry of a params['engines'] list, which is a parameter
+    dict after save(), but may be an already-built Engine, since build_engine()
+    accepts either."""
+    if isinstance(entry,dict):
+        return entry.get('name')
+    return getattr(entry,'name',None)
+
+
+def _remap_path(path: str, to_windows: bool) -> str:
+    """Translate one path between 'X:/...' and '/mnt/X/...' form.
+
+    Returns `path` unchanged when it is not in the other platform's form, so
+    applying this twice, or to an already-correct path, is a no-op -- which is
+    what makes remap_paths() idempotent.
+
+    The drive letter's case is preserved on the way to /mnt, because mount
+    points are case-sensitive and this project's is '/mnt/H', and upper-cased
+    on the way to a drive spec, where Windows ignores case.
+
+    Note that '/mnt/home/...' is not a drive: the pattern requires the
+    component after /mnt to be a single letter.
+    """
+    if to_windows:
+        match = _WSL_MOUNT.match(path)
+        if match is None:
+            return path
+        return match.group(1).upper() + ':/' + path[match.end():].lstrip('/')
+
+    match = _WIN_DRIVE.match(path)
+    if match is None:
+        return path
+    return '/mnt/' + match.group(1) + '/' + path[match.end():].replace(chr(92),'/')
+
 
 class InferenceEngine:
     """Wraps a trained YOLOv2Tiny model and any number of pre- or post-
@@ -118,7 +168,256 @@ class InferenceEngine:
         
         # Build or rebuild the inference pipeline
         self._build_inference_pipeline()
-        
+
+    @property
+    def engine_names(self) -> list:
+        """Names of this pipeline's engines, in the order they are executed.
+
+        The names are the engines' `name` class attributes, which is also the
+        key `Engine.save()` stores them under -- so the same name identifies an
+        engine both in a built pipeline and in a saved parameter dict.
+        """
+        return list(self._inference_pipeline.keys())
+
+    def get_engine(self, name: str) -> Engine:
+        """Return the engine called `name`.
+
+        Use this instead of indexing `self.engines`: a positional index
+        silently returns the WRONG engine as soon as an engine is inserted into
+        or removed from the chain, whereas a wrong name raises here, naming
+        every engine the pipeline actually has.
+
+        Parameters
+        ----------
+        name : str
+            An engine's `name`, e.g. 'BackgroundSub' or
+            'YOLO_EnDecode_Engine'. See `engine_names`.
+
+        Raises
+        ------
+        TypeError
+            If `name` is not a string. Deliberately not an index: this method
+            exists to replace positional access, and silently accepting an int
+            would defeat that.
+        KeyError
+            If no engine of that name is in the pipeline. The message lists
+            `engine_names`, since the usual cause is a renamed or reordered
+            chain.
+        """
+        if not isinstance(name, str):
+            raise TypeError(f'Engine name must be {str}, received '
+                            f'{type(name)}. Engines are looked up by name, '
+                            f'not by position -- see self.engine_names.')
+
+        try:
+            return self._inference_pipeline[name]
+        except KeyError:
+            # from None: the bare KeyError('BackgroundSub') of the dict lookup
+            # adds nothing to the message built here.
+            raise KeyError(f"No engine named '{name}' in this pipeline. "
+                           f"Available engines, in execution order: "
+                           f"{self.engine_names}.") from None
+
+    def __getitem__(self, name: str) -> Engine:
+        """`inf_engine['BackgroundSub']` -- shorthand for get_engine().
+
+        Note that this does NOT make the pipeline iterable: get_engine()
+        rejects the integer indices Python's legacy iteration protocol would
+        pass, with the same TypeError iterating this object raised before this
+        method existed. Iterate `self.engines` instead.
+        """
+        return self.get_engine(name)
+
+    # Engine parameters that hold a filesystem path, and therefore have to be
+    # translated when a saved pipeline moves between Windows and Linux. An
+    # engine that is not listed here is left alone; add an entry when another
+    # engine starts carrying a path.
+    PATH_PARAMS = {'DLEngine': ('dl_model',)}
+
+    @classmethod
+    def remap_paths(cls, params: dict, platform: str = None) -> dict:
+        """Translate the paths in a saved parameter dict to the platform this
+        process is running on, IN PLACE, returning that same dict.
+
+        Call it between loading a dict and building from it:
+
+            params = pkl.load(open(path,'rb'))
+            inf_engine = build_engine(**InferenceEngine.remap_paths(params))
+
+        Which parameters are paths is declared once, by PATH_PARAMS, so no
+        caller has to name them or index params['engines'] -- which is the
+        point: hand-rolled copies of this translation tend to cover one
+        direction and silently no-op in the other.
+
+        Because _remap_path() leaves a path that is already in the running
+        platform's form untouched, this is idempotent and safe to call on a
+        freshly saved dict.
+
+        An engine named in PATH_PARAMS but absent from `params` is skipped
+        rather than raised on, since the same call has to work for a chain
+        without a DLEngine. So is an entry that is an already-built Engine
+        rather than a parameter dict: its model is loaded already, and there
+        is no path left to translate.
+
+        A remapped path that does not exist is logged as a warning rather than
+        raised on, because a dict may legitimately be prepared for another
+        machine -- but it is the usual sign that the drive is not mounted
+        where this expects it.
+
+        Parameters
+        ----------
+        params : dict
+            An `InferenceEngine.save()` result. Mutated in place.
+        platform : str or None
+            The platform to translate TO, spelled as `sys.platform` does;
+            anything starting with 'win' counts as Windows. Defaults to this
+            process's own platform. Pass it to prepare a dict for the other
+            platform, or to test.
+
+        Returns
+        -------
+        dict
+            `params` itself, so the call can wrap a load.
+        """
+        if platform is None:
+            platform = sys.platform
+
+        to_windows = platform.startswith('win')
+
+        # Validated here, once, rather than relying on get_engine_params()
+        # below -- whose KeyError this method deliberately treats as "that
+        # engine is not in this pipeline".
+        if not isinstance(params,dict):
+            raise TypeError(f'Expected a saved parameter dict ({dict}), '
+                            f'received {type(params)}.')
+
+        if 'engines' not in params:
+            raise KeyError("Parameter dict carries no 'engines' key, so it is "
+                           'not an InferenceEngine.save() result. Its keys '
+                           f'are: {sorted(params.keys())}.')
+
+        present = {_engine_param_name(entry) for entry in params['engines']
+                   if isinstance(entry,dict)}
+
+        for engine_name, keys in cls.PATH_PARAMS.items():
+
+            if engine_name not in present:
+                continue
+
+            engine_params = cls.get_engine_params(params,engine_name)
+
+            for key in keys:
+
+                path = engine_params.get(key)
+
+                # Not every pipeline carries a path here: dl_model is None
+                # before a model is set, and may be a live keras model.
+                if not isinstance(path,str):
+                    continue
+
+                remapped = _remap_path(path,to_windows)
+
+                if remapped != path:
+                    engine_params[key] = remapped
+                    logger.info("Remapped %s.%s for platform '%s': %s -> %s",
+                                engine_name,key,platform,path,remapped)
+
+                if not Path(engine_params[key]).exists():
+                    logger.warning('%s.%s does not exist on this platform: %s',
+                                   engine_name,key,engine_params[key])
+
+        return params
+
+    @staticmethod
+    def get_engine_params(params: dict, name: str) -> dict:
+        """Look an engine up by name in a SAVED parameter dict, i.e. before
+        any engine has been built.
+
+        The counterpart to get_engine(), for the other side of the pickle.
+        `Engine.name` is a class attribute and `save()` stores it under the
+        'name' key, so one and the same name identifies an engine in a built
+        pipeline and in `InferenceEngine.save()`'s output -- which is what lets
+        a caller drop positional indices into params['engines'] entirely.
+
+        The entry is returned AS IS, not copied, so that writing to it writes
+        through to `params`:
+
+            InferenceEngine.get_engine_params(params,'DLEngine')['dl_model']                 = remapped_path
+            inf_engine = build_engine(**params)
+
+        That in-place edit is the whole point -- handing back a copy would turn
+        such a remap into a silent no-op, which is a worse failure than the
+        positional indexing this replaces.
+
+        Parameters
+        ----------
+        params : dict
+            A dict as produced by `InferenceEngine.save()`, i.e. carrying an
+            'engines' list of per-engine parameter dicts. The whole dict, not
+            its 'engines' value, so that callers never touch the structure.
+        name : str
+            The engine's `name`, e.g. 'DLEngine'.
+
+        Returns
+        -------
+        dict
+            That engine's parameter dict, still part of `params`.
+
+        Raises
+        ------
+        TypeError
+            If `params` is not a dict, `name` is not a string, or the entry
+            found is an already-built Engine rather than a parameter dict (use
+            get_engine() on the built pipeline for that).
+        KeyError
+            If `params` has no 'engines' key, or no engine of that name is in
+            it -- the message lists the names that are.
+        ValueError
+            If several entries carry that name, since returning the first
+            would silently hide the others.
+        """
+        if not isinstance(name, str):
+            raise TypeError(f'Engine name must be {str}, received '
+                            f'{type(name)}. Engines are looked up by name, '
+                            'not by position.')
+
+        if not isinstance(params, dict):
+            raise TypeError(f'Expected a saved parameter dict ({dict}), '
+                            f'received {type(params)}.')
+
+        try:
+            engines = params['engines']
+        except KeyError:
+            raise KeyError("Parameter dict carries no 'engines' key, so it is "
+                           'not an InferenceEngine.save() result. Its keys '
+                           f'are: {sorted(params.keys())}.') from None
+
+        # Entries are parameter dicts after save(), but build_engine() also
+        # accepts already-built Engines in that list, so _engine_param_name()
+        # reads the name off either and the type check below produces the
+        # better message.
+        matches = [entry for entry in engines
+                   if _engine_param_name(entry) == name]
+
+        if not matches:
+            raise KeyError(f"No engine named '{name}' in this parameter dict. "
+                           'Engines it carries, in execution order: '
+                           f'{[_engine_param_name(entry) for entry in engines]}.')
+
+        if len(matches) > 1:
+            raise ValueError(f"{len(matches)} engines named '{name}' in this "
+                             'parameter dict -- a name has to identify one '
+                             'engine, since the built pipeline is keyed by '
+                             'it. Give them distinct names.')
+
+        if not isinstance(matches[0],dict):
+            raise TypeError(f"Engine '{name}' in this parameter dict is an "
+                            f'already-built {type(matches[0])}, not a '
+                            'parameter dict. Build the pipeline and use '
+                            'InferenceEngine.get_engine() instead.')
+
+        return matches[0]
+
     def __call__(self, data, frame_idx = None, conf_min = 0.9, **kwargs):
 
         # Check type of passed data
@@ -281,7 +580,7 @@ class InferenceEngine:
             update_annotations = inference['YOLO_EnDecode_Engine']
             
     
-        update_frame = inference['PreprocEngAWA']['frame']
+        update_frame = inference['ZeroCorners']['frame']
     
         self._inference_pipeline['BackgroundSub'].update_bg(update_frame,
                                                             update_annotations)
@@ -360,6 +659,10 @@ class InferenceEngine:
         
         # Create an input/output mapping from the engines' names and their order
         self._determineIOMapping()
+
+        # Fail here, rather than once a frame reaches the model, if the
+        # preprocessing chain and the model disagree on the channel count
+        self._check_input_channels()
         
         # Check which engines need updating after each step
         # engines_requiring_update = []
@@ -371,6 +674,43 @@ class InferenceEngine:
         # self._engines_requiring_update = engines_requiring_update
                     
         
+    def _check_input_channels(self) -> None:
+        """Check that the preprocessing chain emits as many channels as the
+        model was built for.
+
+        Only BackgroundSub changes the channel count -- it stacks the frame
+        that entered the subtraction as a second channel when its stack_raw
+        flag is set -- so the number is known without running a frame through
+        the pipeline. Without this check a mismatch shows up only once a frame
+        reaches the model, as a per-frame exception raised inside the first
+        convolution and swallowed by whatever is driving the pipeline.
+        """
+        dl_engine = self._inference_pipeline.get('DLEngine')
+
+        if dl_engine is None:
+            return
+
+        model_shape = getattr(getattr(dl_engine,'dl_model',None),
+                              'input_shape',None)
+
+        if model_shape is None:
+            return
+
+        bg_engine = self._inference_pipeline.get('BackgroundSub')
+
+        stack_raw = bool(getattr(bg_engine,'stack_raw',False))
+        frame_channels = 2 if stack_raw else 1
+        model_channels = model_shape[-1]
+
+        if frame_channels != model_channels:
+            raise ValueError(
+                'Channel mismatch between preprocessing and model: the '
+                f'chain emits {frame_channels} channel(s) '
+                f'(BackgroundSub.stack_raw = {stack_raw}), but the model was '
+                f'built for {model_channels} (input_shape '
+                f'{tuple(model_shape)}). Set stack_raw and the model '
+                'input_shape consistently.')
+
     def _determineIOMapping(self) -> None:
         
         # Dictionary that maps engine.name -> engine input 
