@@ -27,6 +27,17 @@ from hsdetect import Engine
 
 IS_ENGINE_MODULE = True
 
+# Sentinel class id for a box whose class is not known -- e.g. a person
+# annotated with pose='undefined'. Such a box keeps its box and objectness
+# targets; only its class slots are left at zero, which hsod.dl.loss reads
+# as "leave this box out of the classification term".
+#
+# Duplicated from hsod.dl.targets (the single definition, whose comment
+# there spells out the convention) rather than imported: hsod is not
+# installed on the inference target this module runs on. Keep the two
+# values in step.
+CLASS_IGNORE = -1
+
 def build_decoding_engine(**kwargs):
     name = kwargs.pop('name')
     if name == 'YOLO_EnDecode_Engine':
@@ -111,6 +122,10 @@ class YOLO_EnDecode_Engine(Engine):
         self.yolo_stride = self.yolo_grid_cell_size
         self.yolo_n_anchors = len(yolo_anchors)
         self.n_anchor_channels = (5 + yolo_n_classes) * self.yolo_n_anchors
+
+        # From here on the engine is fully built, which is what the
+        # yolo_n_classes setter checks -- see there.
+        self._init_complete = True
        
     @property
     def SensorType(self):
@@ -144,8 +159,26 @@ class YOLO_EnDecode_Engine(Engine):
     
     @yolo_n_classes.setter
     def yolo_n_classes(self,yolo_n_classes:int):
+        # Rejected once the engine is built, rather than recomputing
+        # n_anchor_channels here (which is what the line commented out below
+        # used to do). Recomputing it would make this one attribute
+        # consistent and leave everything else stale: the channel count of
+        # the trained DetectionHead that feeds this engine, the class_<i>
+        # columns emitted by _yolo_predictions_to_bboxes() and
+        # _empty_annotations(), and the target depth written by
+        # encode_yolo_target(). A decoder that disagrees with the weights it
+        # decodes fails silently -- the tensor still unpacks and the boxes
+        # still look plausible, only the channels have moved -- so refuse
+        # instead and build a new engine.
+        if getattr(self, '_init_complete', False):
+            raise AttributeError(
+                f'yolo_n_classes is fixed when the engine is constructed '
+                f'(it is {self._yolo_n_classes}, and was asked to become '
+                f'{yolo_n_classes}). It defines the channel layout of the '
+                f'model output this engine decodes. Construct a new '
+                f'YOLO_EnDecode_Engine, or edit the inf_engine_params dict '
+                f'and rebuild the chain with build_engine().')
         self._yolo_n_classes = yolo_n_classes
-        # self.n_anchor_channels = (5 + yolo_n_classes) * self.yolo_n_anchors
         
     # @property
     # def yolo_n_anchors(self):
@@ -239,7 +272,8 @@ class YOLO_EnDecode_Engine(Engine):
     def constrain_channels(self, 
                            yolo_output_unpacked : tf.Tensor) -> tf.Tensor :
         """
-        Applies sigmoid activation function to the tx, ty and conf channel.
+        Applies the sigmoid activation function to the tx, ty and conf
+        channels, and to the class channels if the engine has any.
         
         Expects an unpacked yolo output vector of shape 
         
@@ -296,6 +330,24 @@ class YOLO_EnDecode_Engine(Engine):
         channels[0] = tf.sigmoid(channels[0])
         channels[1] = tf.sigmoid(channels[1])
         channels[4] = tf.sigmoid(channels[4])
+
+        # The class channels get a sigmoid EACH, not a softmax over them:
+        # they are independent logistic classifiers, matching the
+        # classification term of hsod.dl.loss, so a box may score high on
+        # several of them at once. That is what lets 'lying' be an attribute
+        # of a detected person instead of a rival object category -- and it
+        # is why a person mid-fall can read as part standing, part lying
+        # rather than having to pick one.
+        #
+        # The DetectionHead stays linear (see dl/layers.py), so these arrive
+        # as raw logits and have to be squashed here: everything downstream
+        # treats them as probabilities -- the class_<i> columns built by
+        # _yolo_predictions_to_bboxes(), the posture labels drawn by
+        # AnnotatedVideoPlayer, and any threshold applied to the lying
+        # channel. A logit of 0 becomes 0.5, so an untrained or indifferent
+        # class channel reads as "no idea", not as "no".
+        for channel in range(5, 5 + self.yolo_n_classes):
+            channels[channel] = tf.sigmoid(channels[channel])
         
         yolo_output_unpacked = tf.stack(channels, axis=-1)  
         
@@ -632,9 +684,19 @@ class YOLO_EnDecode_Engine(Engine):
         # A single object typically triggers the same anchor in several
         # neighbouring cells. Walk the predictions from most to least
         # confident, keep each one, and drop every later box that overlaps
-        # it by more than nms_iou_threshold. Class-agnostic, which is what
-        # the paper's single implicit-class design calls for (n_classes=0);
-        # with explicit classes this would have to run per class.
+        # it by more than nms_iou_threshold.
+        #
+        # Suppression is class-agnostic and ranks by objectness alone, and it
+        # stays that way now that there are explicit class channels. Those
+        # channels describe the posture of a detected person, not competing
+        # object categories, so a box is one person whatever its pose
+        # channels say. Running NMS per class would report that person once
+        # per class above threshold, and a person mid-fall -- genuinely
+        # between standing and lying -- would come out as two overlapping
+        # detections of the same body. Ranking by obj * class_k instead of
+        # obj alone would be just as wrong: a box would then survive or die
+        # by a posture guess rather than by how sure the network is that
+        # somebody is there at all.
         if nms_iou_threshold is not None and len(bboxes) > 1:
             
             boxes = np.array([[bbox['xtl'], bbox['ytl'], bbox['xbr'], bbox['ybr']]
@@ -777,9 +839,26 @@ class YOLO_EnDecode_Engine(Engine):
             # cells of the target tensor
             yolo_target[batch_idx][target_idx][:5] = (tx, ty, tw, th, 1.0)
             
-            # Write the target conditional class probability
-            if self.yolo_n_classes > 0:
-                class_idx = min(a.class_id, self.yolo_n_classes - 1)
+            # Write the target conditional class probability. Skipped for a
+            # box whose class is unknown: its class slots stay at zero, which
+            # hsod.dl.loss reads as "leave this box out of the
+            # classification term", while the objectness written above keeps
+            # it training the detector. Note the objectness write is
+            # unconditional -- an annotation is a person either way.
+            if self.yolo_n_classes > 0 and int(a.class_id) != CLASS_IGNORE:
+                class_idx = int(a.class_id)
+
+                # Clamping an out-of-range id (what this used to do) silently
+                # relabels the box as the last class, and a negative id would
+                # index backwards from the end of the channel axis and land
+                # in the objectness slot. Both are worse than stopping.
+                if not 0 <= class_idx < self.yolo_n_classes:
+                    raise ValueError(
+                        f'Class id {class_idx} out of range for '
+                        f'yolo_n_classes={self.yolo_n_classes}. Expected an '
+                        f'id in [0, {self.yolo_n_classes - 1}] or '
+                        f'{CLASS_IGNORE} (CLASS_IGNORE).')
+
                 yolo_target[batch_idx][target_idx][5 + class_idx] = 1.0
             
         return yolo_target, image_id_to_batch_idx, idx_to_annotID
@@ -891,7 +970,14 @@ def assign_boxes_to_gridcell_anchors(
 
     for idx, row in df_center.iterrows():
         image_id = row["image_id"] if has_image_id else "default"
-        class_id = int(row["class_id"]) if has_class_id else 0
+        # A missing or non-finite class id means "class unknown", not class
+        # 0: the box is still an object, still trains objectness and
+        # localization, and must not claim a class it was never annotated
+        # with. Mirrors hsdetect.dl.video_dataset.build_frame_targets().
+        if has_class_id and pd.notna(row["class_id"]):
+            class_id = int(row["class_id"])
+        else:
+            class_id = CLASS_IGNORE
         
         # Divide center coordinates of box by stride to obtain the coordinates
         # of the grid cell the box center falls into
@@ -1046,6 +1132,80 @@ if __name__ == "__main__":
         
     if not (img500_annot_yolo[comp_cols] ==  img500_annot[comp_cols]).all(None):
         raise ValueError('Test failed. Annotations are not identical.')
+
+    # 6. Class channels. Needs no test data: a second engine with the three
+    # posture classes, a handful of synthetic boxes, and the two things that
+    # have to hold for them -- an unknown class id stays out of the class
+    # slots, and constrain_channels() hands the class channels on as
+    # probabilities rather than logits.
+    n_classes_pose = 3
+    pose_engine = YOLO_EnDecode_Engine(SensorTypes['HTPA160x120DR1_L3K95_0K8'],
+                                       anchors,
+                                       grid_size,
+                                       n_classes_pose)
+
+    pose_annot = pd.DataFrame({
+        'image_id': [0, 0, 0],
+        'id': [0, 1, 2],
+        'xtl': [20.0, 60.0, 100.0],
+        'ytl': [20.0, 50.0, 10.0],
+        'xbr': [30.0, 80.0, 110.0],
+        'ybr': [40.0, 90.0, 30.0],
+        # lying, standing, and a person whose pose was never annotated
+        'class_id': [2, 0, CLASS_IGNORE],
+    })
+
+    pose_target, _, pose_ids = pose_engine.encode_yolo_target(pose_annot)
+
+    assigned = pose_target[..., 4] == 1.0
+    if int(assigned.sum()) != 3:
+        raise ValueError('Test failed. Every annotation must carry '
+                         f'objectness, got {int(assigned.sum())} of 3.')
+
+    class_slots = pose_target[..., 5:][assigned]
+    n_labelled = int((class_slots.max(axis=-1) == 1.0).sum())
+    per_class = class_slots.sum(axis=0).tolist()
+    if n_labelled != 2 or per_class != [1.0, 0.0, 1.0]:
+        raise ValueError('Test failed. Expected 2 labelled boxes with one '
+                         f'standing and one lying, got {n_labelled} '
+                         f'labelled and per-class counts {per_class}.')
+
+    bad_annot = pose_annot.copy()
+    bad_annot.loc[0, 'class_id'] = n_classes_pose      # one past the last id
+    try:
+        pose_engine.encode_yolo_target(bad_annot)
+    except ValueError:
+        pass
+    else:
+        raise ValueError('Test failed. An out-of-range class id must raise '
+                         'rather than be clamped to the last class.')
+
+    try:
+        pose_engine.yolo_n_classes = 5
+    except AttributeError:
+        pass
+    else:
+        raise ValueError('Test failed. yolo_n_classes must not be settable '
+                         'on a built engine.')
+
+    # constrain_channels(): conf and all three class channels are squashed.
+    logits = np.zeros((1, grid_size[0], grid_size[1], len(anchors),
+                       5 + n_classes_pose), dtype=np.float32)
+    logits[0, 3, 4, 0, 4:] = [2.0, -2.0, 0.0, 2.0]
+    constrained = pose_engine.constrain_channels(tf.constant(logits)).numpy()
+
+    expected = 1.0 / (1.0 + np.exp(-np.array([2.0, -2.0, 0.0, 2.0])))
+    if not np.allclose(constrained[0, 3, 4, 0, 4:], expected, atol=1e-6):
+        raise ValueError('Test failed. Expected sigmoid-squashed conf and '
+                         f'class channels {expected}, got '
+                         f'{constrained[0, 3, 4, 0, 4:]}.')
+
+    # An untouched class logit of 0 must read as 0.5 ("no idea"), not 0.0.
+    if not np.isclose(constrained[0, 0, 0, 0, 5], 0.5, atol=1e-6):
+        raise ValueError('Test failed. A class logit of 0 must decode to '
+                         f'0.5, got {constrained[0, 0, 0, 0, 5]}.')
+
+    print('All self-tests passed.')
         
         
 # def decode_predictions(

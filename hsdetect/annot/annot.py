@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from typing import Dict, Any
 import pickle as pkl
+import re
+import warnings
 
 import shutil
 import subprocess
@@ -33,6 +35,20 @@ from matplotlib.patches import Rectangle
 # from hsdetect.gui.players import AnnotatedVideoPlayer
 from hspytools.tparray import TPArray, ArrayTypes
 from hspy.readers import HTPAdGUI_FileReader 
+
+
+# Default display names for the predicted class channels, in channel order.
+# Mirrors the pose class map used to build the training targets
+# ({'standing': 0, 'sitting': 1, 'lying': 2}, see
+# hsdetect.dl.video_dataset.build_frame_targets). Only AnnotatedVideoPlayer
+# reads this, for labelling boxes; nothing in the data pipeline does, so a
+# model trained with a different class map must pass its own names via
+# AnnotatedVideo.play(class_names=...).
+POSE_CLASS_NAMES = ('standing', 'sitting', 'lying')
+
+# Column names of the predicted per-class probabilities, as emitted by
+# hsdetect.dl.decode._yolo_predictions_to_bboxes ('class_0', 'class_1', ...).
+_CLASS_COL_RE = re.compile(r'class_(\d+)')
 
 
 class RoI:
@@ -638,7 +654,8 @@ class AnnotatedVideo:
                         grid_shape: Tuple[int, int],
                         num_classes: int = 1,
                         class_column: str = "label",
-                        include_fringes : bool = True):
+                        include_fringes : bool = True,
+                        class_map: Optional[Dict[Any, int]] = None):
         """
         Build a tf.data.Dataset of (image, y_true) pairs from this video's
         frames, ready to feed to a YOLOv2-style detector.
@@ -675,6 +692,17 @@ class AnnotatedVideo:
         include_fringes : bool
             If false, all annotations that coincide with any image border are 
             deleted. The corresponding frame is deleted as well.
+        class_map : dict or None
+            Optional mapping from the raw values of `class_column` to integer
+            class ids, e.g. {'standing': 0, 'sitting': 1, 'lying': 2} for
+            class_column='pose'. Passed straight through to
+            build_frame_targets(): every value the map does not mention
+            (CVAT's pose='undefined', NaN, the -99 that the annotation import
+            fills in for missing columns) is encoded as CLASS_IGNORE, which
+            keeps the box and its objectness target but leaves all class
+            slots at zero, so the classification loss skips that box. If None
+            (default), `class_column` is assumed to already hold integer
+            class ids -- the behaviour before class_map existed.
 
         Returns
         -------
@@ -682,6 +710,19 @@ class AnnotatedVideo:
             Yields (image, y_true) pairs, one per frame, in frame order.
         """
         from hsdetect.dl.video_dataset import build_video_dataset
+
+        # Catch the realistic mistake of asking for several class channels but
+        # forgetting the map: without one, `class_column` is read as integer
+        # class ids, so a label column that is constant (as 'label' is for a
+        # single-label project) would silently train every box as class 0.
+        if num_classes > 1 and class_map is None:
+            warnings.warn(
+                f'to_yolo_dataset(num_classes={num_classes}) without a '
+                f'class_map: the values of column {class_column!r} are used '
+                f'as class ids directly. Pass class_column="pose" and '
+                f'class_map={{"standing": 0, "sitting": 1, "lying": 2}} to '
+                f'encode the CVAT pose attribute.',
+                stacklevel=2)
         
         # Try to obtain 'id' from metadata and return an error if it does not
         # exist or has the wrong type
@@ -735,7 +776,8 @@ class AnnotatedVideo:
             grid_shape=grid_shape,
             num_classes=num_classes,
             class_column=class_column,
-            sequence_id = sequence_id
+            sequence_id = sequence_id,
+            class_map=class_map
         )
     
     def frames_as_pdDataFrame(self):
@@ -1209,6 +1251,8 @@ class AnnotatedVideo:
         draw_fn: Optional[
             Callable[[Image.Image, int, Any], Image.Image]
         ] = None,
+        class_names: Optional[List[str]] = None,
+        class_thresh: float = 0.5,
     ) -> None:
         
         player = AnnotatedVideoPlayer(
@@ -1219,6 +1263,9 @@ class AnnotatedVideo:
             scale=scale,
             title=title,
             draw_fn=draw_fn,
+            global_scaling=global_scaling,
+            class_names=class_names,
+            class_thresh=class_thresh,
         )
         player.run()
         
@@ -1243,6 +1290,16 @@ class AnnotatedVideoPlayer:
     draw_fn : callable, optional
         Callable(img, idx, key) -> PIL.Image, applied to the PIL image BEFORE
         overlaying canvas rectangles.
+    class_names : list of str, optional
+        Display names for the predicted class channels, in channel order
+        (names[i] belongs to column 'class_i'). Must have one entry per
+        class_* column present in the boxes. Defaults to POSE_CLASS_NAMES
+        when exactly len(POSE_CLASS_NAMES) class columns are found, and to
+        'class_0', 'class_1', ... otherwise.
+    class_thresh : float, default=0.5
+        Probability above which a predicted class is printed next to the box.
+        The class channels are independent sigmoids, so none, one or several
+        of them can be above the threshold for the same box.
     """
 
     dtypes = {'xtl':'float32','ytl':'float32',
@@ -1259,7 +1316,9 @@ class AnnotatedVideoPlayer:
         scale: float = 1.0,
         title: Optional[str] = None,
         draw_fn: Optional[Callable[[Image.Image, int, Any], Image.Image]] = None,
-        global_scaling = True
+        global_scaling = True,
+        class_names: Optional[List[str]] = None,
+        class_thresh: float = 0.5,
     ) -> None:
         self.video = video
         self.fps = fps
@@ -1267,6 +1326,8 @@ class AnnotatedVideoPlayer:
         self.scale = float(scale)
         self.title = title or "AnnotatedVideo Player"
         self.draw_fn = draw_fn
+        self.class_names = list(class_names) if class_names is not None else None
+        self.class_thresh = float(class_thresh)
         
         
         # Determine global scaling parameters
@@ -1457,6 +1518,20 @@ class AnnotatedVideoPlayer:
             if opt_col in df.columns:
                 needed_cols.append(opt_col)
         
+        # Posture columns, if the boxes carry any. Ground truth annotations
+        # hold the CVAT 'pose' attribute as a string; predictions hold one
+        # 'class_<i>' probability column per class channel (see
+        # dl.decode._yolo_predictions_to_bboxes). Both are optional, and are
+        # kept out of optional_cols because 'pose' must not go through the
+        # numeric cast below.
+        pose_cols = ['pose'] if 'pose' in df.columns else []
+        class_cols = sorted(
+            (c for c in df.columns
+             if isinstance(c, str) and _CLASS_COL_RE.fullmatch(c)),
+            key=lambda c: int(_CLASS_COL_RE.fullmatch(c).group(1)))
+        needed_cols = needed_cols + pose_cols + class_cols
+        class_names = self._resolve_class_names(len(class_cols))
+
         # Cast DataFrame to float type because shifted boxes will not
         # coincide with full pixels
         df = df[needed_cols].copy()
@@ -1467,6 +1542,8 @@ class AnnotatedVideoPlayer:
         for c in optional_cols:
             if c in needed_cols:
                 df[c] = pd.to_numeric(df[c], errors="coerce").astype(np.float32)
+        for c in class_cols:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype(np.float32)
     
         # Then shift boxes (shift function expects xtl/ytl/xbr/ybr columns)
         df = self._shift_bboxes(df.copy())
@@ -1553,7 +1630,79 @@ class AnnotatedVideoPlayer:
                     )
                     texts.append(txt)
     
+            # Draw the posture label (top-right corner), either the annotated
+            # pose attribute or the predicted class channels.
+            pose_label = self._posture_label(df.iloc[p], pose_cols,
+                                             class_cols, class_names)
+            if pose_label:
+                txt = self.canvas.create_text(
+                    x2 - pad,
+                    y1 + pad,
+                    anchor="ne",
+                    text=pose_label,
+                    fill=color,          # match box color
+                    font=font,
+                )
+                texts.append(txt)
+    
         return rects, texts
+
+    def _resolve_class_names(self, n_classes: int) -> list[str]:
+        """Display names for the n_classes 'class_<i>' columns found."""
+        if n_classes == 0:
+            return []
+        if self.class_names is not None:
+            if len(self.class_names) != n_classes:
+                raise ValueError(
+                    f'{len(self.class_names)} class_names given but the boxes '
+                    f'carry {n_classes} class_* columns. Pass one name per '
+                    f'class channel, in channel order.')
+            return list(self.class_names)
+        if n_classes == len(POSE_CLASS_NAMES):
+            return list(POSE_CLASS_NAMES)
+        return [f'class_{i}' for i in range(n_classes)]
+
+    def _posture_label(self,
+                       row: pd.Series,
+                       pose_cols: list[str],
+                       class_cols: list[str],
+                       class_names: list[str]) -> str:
+        """Build the posture text for one box.
+
+        The annotated pose wins over a prediction: it is ground truth, and a
+        box that carries both is a ground truth box in a frame that also
+        holds predictions. A pose of 'undefined' (or the -99 / NaN that stand
+        for a missing attribute) counts as no annotation and falls through to
+        the prediction, mirroring how build_frame_targets() treats those
+        values.
+        """
+        if pose_cols:
+            pose = row['pose']
+            if pd.notna(pose) and str(pose) not in ('', '-99', '-99.0',
+                                                    'undefined'):
+                return str(pose)
+
+        if not class_cols:
+            return ''
+
+        probs = pd.to_numeric(row[class_cols],
+                              errors='coerce').to_numpy(dtype=np.float32)
+        finite = np.isfinite(probs)
+        if not finite.any():
+            return ''
+
+        above = [(class_names[i], probs[i]) for i in range(len(probs))
+                 if finite[i] and probs[i] >= self.class_thresh]
+        if above:
+            return ' '.join(f'{n} {pr:.2f}' for n, pr in above)
+
+        # Nothing is above the threshold. The class channels are independent
+        # sigmoids trained with an ignore mask (see build_frame_targets), so
+        # "all low" is a legitimate answer -- posture unknown -- and must not
+        # be rendered as if the argmax had won. Show the strongest candidate
+        # in parentheses to mark it as below threshold.
+        best = int(np.argmax(np.where(finite, probs, -np.inf)))
+        return f'({class_names[best]} {probs[best]:.2f})'
 
     def _draw_overlays(self, i: int, sf: float) -> None:
         if self.canvas is None:

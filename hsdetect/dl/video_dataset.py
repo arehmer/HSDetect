@@ -17,6 +17,13 @@ with xtl/ytl/xbr/ybr, and optionally a class label column) works.
 Assumes images are ALREADY background-subtracted (per request) -- no
 background handling happens here.
 
+Class labels: a box's class id is read from `class_column`, optionally
+through a `class_map` that translates the raw annotation values (e.g. the
+CVAT `pose` attribute's 'standing'/'sitting'/'lying') into class ids. A box
+whose label the map does not cover keeps its box and objectness targets --
+it is still a person -- and only its class slots are left at zero, which
+hsod.dl.loss reads as "class unknown". See CLASS_IGNORE below.
+
 A frame may additionally carry `.image2`, the frame as it entered background
 subtraction (set by BackgroundSub._process_aframe(), with its scene level
 removed further down the preprocessing chain by MedianSub). When present it
@@ -25,15 +32,31 @@ hsdetect.netinput, which DLEngine uses as well, so the training-time and
 inference-time input arrays are formed by identical code.
 """
 
-from typing import List, Tuple, Sequence, Optional
+from typing import List, Tuple, Sequence, Optional, Dict, Any
 
 import numpy as np
 import pandas as pd
 import tensorflow as tf
 
-from hsod.dl.targets import xyxy_to_center, assign_boxes, encode_box
+from hsod.dl.targets import (xyxy_to_center, assign_boxes, encode_box,
+                             CLASS_IGNORE)
 
 from hsdetect.netinput import make_net_input, stack_channels
+
+
+# CLASS_IGNORE (-1), imported above, is the sentinel class id for a box
+# whose class is not known -- e.g. a person annotated with
+# pose='undefined', or a sequence annotated before the pose attribute
+# existed. Such a box is still a person: it keeps its box and objectness
+# targets and only its class slots are left at zero. See the comment at
+# the class-slot write in build_frame_targets() for why that encoding only
+# means "unknown" in combination with the class mask in hsod.dl.loss, and
+# not "none of the classes".
+#
+# It is imported rather than redefined here so that there is a single
+# definition to keep right (hsod.dl.targets, the module this one already
+# depends on for the encoding itself). Importing the name from here keeps
+# working.
 
 
 def build_frame_targets(
@@ -45,6 +68,7 @@ def build_frame_targets(
     num_classes: int = 1,
     class_column: str = "label",
     image2: Optional[np.ndarray] = None,
+    class_map: Optional[Dict[Any, int]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Build the (image, y_true) pair for a single frame.
 
@@ -68,13 +92,26 @@ def build_frame_targets(
         Number of explicit class channels (0 disables class slots,
         matching loss.py's convention).
     class_column : str
-        Column in `annotations` holding the integer class label, if any.
+        Column in `annotations` holding the class label. Without a
+        `class_map` the column is used as the integer class id directly;
+        with one, its values are looked up in that map (see below).
     image2 : np.ndarray or None
         Optional second image of the same (H, W) shape -- the frame as it
         entered background subtraction, i.e. `AnnotatedFrame.image2`, already
         corrected by the MedianSub engine. If given, it becomes the network
         input's channel 1; if None, the input stays single-channel and this
         function behaves exactly as it did before.
+    class_map : dict or None
+        Optional mapping from the raw values of `class_column` to integer
+        class ids, e.g. {'standing': 0, 'sitting': 1, 'lying': 2} for the
+        CVAT `pose` attribute. Any value NOT in the map -- 'undefined', a
+        NaN, or the -99 that AnnotatedFrame's annotation import fills
+        missing columns with -- becomes CLASS_IGNORE, and so does every
+        box if `class_column` is absent from the annotations altogether.
+        Those boxes keep their box and objectness targets and are left out
+        of the classification term only. If None (default), the column is
+        used as the class id as-is and this function behaves exactly as it
+        did before.
 
     Returns
     -------
@@ -98,9 +135,27 @@ def build_frame_targets(
 
     if annotations is not None and len(annotations) > 0:
         df = annotations.copy()
-        if class_column in df.columns and "class_id" not in df.columns:
-            df["class_id"] = df[class_column]
-        
+        if "class_id" not in df.columns:
+            if class_column in df.columns and class_map is None:
+                # No map given: the column already holds integer class ids.
+                df["class_id"] = df[class_column]
+            elif class_column in df.columns:
+                # Map the raw labels (e.g. the CVAT pose strings) onto class
+                # ids. .map() yields NaN for every value the map does not
+                # mention -- 'undefined', NaN, the -99 filled in by
+                # AnnotatedFrame's annotation import -- which becomes
+                # CLASS_IGNORE here.
+                df["class_id"] = (df[class_column]
+                                  .map(class_map)
+                                  .fillna(CLASS_IGNORE)
+                                  .astype(np.int64))
+            elif class_map is not None:
+                # A map was requested but the column is missing entirely, so
+                # this frame carries no class information at all. Ignore the
+                # class of every box rather than silently calling them all
+                # class 0 -- they are still persons for detection.
+                df["class_id"] = np.int64(CLASS_IGNORE)
+
         # Add x,y,w,h bounding box coordinates
         df_center = xyxy_to_center(df)
         
@@ -124,12 +179,39 @@ def build_frame_targets(
             y_true[a.cell_y, a.cell_x, a.anchor_idx, 2] = tw
             y_true[a.cell_y, a.cell_x, a.anchor_idx, 3] = th
             
-            # The likelihood of an object being in that box is always one
+            # The likelihood of an object being in that box is always one.
+            # Note this is written for EVERY assigned box, whatever its
+            # class id: an annotation always represents a person, and a box
+            # whose class is unknown still has to train objectness and
+            # localization.
             y_true[a.cell_y, a.cell_x, a.anchor_idx, 4] = 1.0
-            
-            # Assign the conditional class probability
-            if num_classes > 0:
-                class_idx = min(int(a.class_id), num_classes - 1)
+
+            # Assign the conditional class probability.
+            #
+            # A box with class id CLASS_IGNORE leaves all class slots at
+            # zero. That all-zero vector means "class unknown" ONLY because
+            # hsod.dl.loss masks the classification term with
+            # reduce_max(class_true, axis=-1), which is 0 for exactly these
+            # boxes and drops them from that term. Without that mask the
+            # same all-zero target reads as "not any of the classes" and
+            # trains every class channel towards 0, which is worse than
+            # leaving the box out -- so this encoding and the mask in the
+            # loss belong together and must not be adopted separately.
+            #
+            # An out-of-range class id is an error rather than something to
+            # clamp: silently folding it into the last class would mislabel
+            # the box (with 3 pose classes, as 'lying'), and a negative id
+            # other than CLASS_IGNORE would index backwards into the
+            # objectness slot.
+            if num_classes > 0 and int(a.class_id) != CLASS_IGNORE:
+                class_idx = int(a.class_id)
+                if not 0 <= class_idx < num_classes:
+                    raise ValueError(
+                        f'Class id {class_idx} out of range for '
+                        f'num_classes={num_classes}. Expected an id in '
+                        f'[0, {num_classes - 1}] or {CLASS_IGNORE} '
+                        f'(CLASS_IGNORE). Check the class_map passed for '
+                        f'column {class_column!r}.')
                 y_true[a.cell_y, a.cell_x, a.anchor_idx, 5 + class_idx] = 1.0
 
     return image_arr, y_true
@@ -143,7 +225,8 @@ def build_video_dataset(
     grid_shape: Tuple[int, int],
     num_classes: int = 1,
     class_column: str = "label",
-    sequence_id: Optional[int] = None
+    sequence_id: Optional[int] = None,
+    class_map: Optional[Dict[Any, int]] = None,
 ) -> tf.data.Dataset:
     """Loop over a sequence of frame-like objects (each with `.image` and
     `.annotations`) and build a tf.data.Dataset of (image, y_true) pairs.
@@ -173,6 +256,10 @@ def build_video_dataset(
         NOTE: don't mix sequence_id=None and sequence_id=<int> datasets
         that you intend to concatenate/combine later -- their element
         structures differ and concatenation will fail.
+    class_map : dict or None
+        Optional mapping from the raw values of `class_column` to integer
+        class ids, passed straight through to build_frame_targets() -- see
+        there for how unmapped labels are handled.
 
     Returns
     -------
@@ -208,6 +295,7 @@ def build_video_dataset(
             # getattr(), not frame.image2: this module duck-types its frames,
             # so a frame-like object without the attribute must still work.
             image2=getattr(frame, 'image2', None),
+            class_map=class_map,
         )
         images_list.append(image_arr)
         y_true_list.append(y_true)
@@ -277,4 +365,61 @@ if __name__ == "__main__":
     print("Total GT objects across frames:", total_objects_in)
     print("Total object slots set in y_true:", total_objects_out)
     assert total_objects_in == total_objects_out, "Mismatch between GT boxes and assigned y_true slots!"
+
+    # ---------------- class_map / CLASS_IGNORE encoding ---------------------
+    # Separate section, exercising build_frame_targets() directly: boxes
+    # carrying the CVAT pose attribute, including values the map does not
+    # cover. The point being asserted is that an unmapped pose costs the box
+    # its class target but NOT its objectness -- every annotation is a
+    # person, labelled posture or not.
+    pose_map = {"standing": 0, "sitting": 1, "lying": 2}
+    poses = ["standing", "sitting", "lying", "lying", "undefined", -99, np.nan]
+
+    # One box per pose, each centered in a grid cell of its own, so no two
+    # can share a (cell, anchor) slot -- assign_boxes() lets a later box
+    # overwrite an earlier one in the same slot, which would quietly make
+    # the counts below wrong. All boxes are the same size here, so they all
+    # pick the same anchor and only the cell keeps them apart.
+    stride_y, stride_x = H / grid_h, W / grid_w
+    pose_cells = [(1, 1), (1, 3), (1, 5), (3, 2), (3, 4), (3, 6), (4, 1)]
+    assert len(pose_cells) == len(poses)
+
+    pose_rows = []
+    for (cell_y, cell_x), pose in zip(pose_cells, poses):
+        cx = (cell_x + 0.5) * stride_x
+        cy = (cell_y + 0.5) * stride_y
+        pose_rows.append({"xtl": cx - 2.5, "ytl": cy - 4.0,
+                          "xbr": cx + 2.5, "ybr": cy + 4.0, "pose": pose})
+
+    _, y_pose = build_frame_targets(
+        image=rng.normal(0, 1, size=(H, W)).astype(np.float32),
+        annotations=pd.DataFrame(pose_rows),
+        anchors=np.asarray(anchors, dtype=np.float32),
+        grid_h=grid_h, grid_w=grid_w,
+        num_classes=3, class_column="pose", class_map=pose_map,
+    )
+
+    assert y_pose.shape == (grid_h, grid_w, 5, 8), y_pose.shape
+    n_obj = int(y_pose[..., 4].sum())
+    n_cls = [int(y_pose[..., 5 + c].sum()) for c in range(3)]
+    n_ignored = int((((y_pose[..., 5:].sum(axis=-1)) == 0.0) & (y_pose[..., 4] == 1.0)).sum())
+    print("Pose encoding -- objects:", n_obj, "per class:", n_cls, "ignored:", n_ignored)
+    assert n_obj == len(poses), "an unlabelled pose must not cost the box its objectness"
+    assert n_cls == [1, 1, 2], n_cls
+    assert n_ignored == 3, n_ignored
+
+    # An id outside [0, num_classes) is an error, not something to clamp.
+    try:
+        build_frame_targets(
+            image=rng.normal(0, 1, size=(H, W)).astype(np.float32),
+            annotations=pd.DataFrame(pose_rows),
+            anchors=np.asarray(anchors, dtype=np.float32),
+            grid_h=grid_h, grid_w=grid_w,
+            num_classes=2, class_column="pose", class_map=pose_map,
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("expected ValueError for class id 2 with num_classes=2")
+
     print("Self-test passed.")

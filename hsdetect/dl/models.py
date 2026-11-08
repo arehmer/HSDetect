@@ -73,6 +73,49 @@ class YOLOv2Tiny(tf.keras.Model):
         self._save_path = save_path
         
     @property
+    def _layers_built(self):
+        """True once build_model() has created this instance's layers.
+
+        Derived from the layers themselves rather than tracked in a flag, so
+        it is right however build_model() was reached -- from __init__, from
+        a later manual call once the properties were filled in, or from
+        keras deserializing a saved model.
+        """
+        return getattr(self, 'head', None) is not None
+
+    def _reject_change_after_build(self, attr_name, old, new):
+        """Refuse a CHANGE to a shape-determining attribute once the layers
+        exist. Does nothing before the model is built.
+
+        Re-assigning the same value is allowed on purpose: a script may
+        legitimately restate a value the model was already configured with
+        (1_DetermineAnchors.py writes the anchor count it settled on back
+        onto the model, which script 00 had already been given), and such an
+        assignment cannot desynchronize anything.
+
+        A real change is refused rather than applied, because these three
+        attributes do not merely describe the model -- they determined how it
+        was built. input_shape fixed the grid the backbone produces;
+        num_anchors and num_classes fixed the output channel count of
+        DetectionHead, num_anchors * (5 + num_classes), and with it the
+        kernel shape of its Conv2D, which by then already holds weights.
+        Assigning a new value would change what grid_shape,
+        num_output_channels and output_shape report while leaving the layers
+        exactly as they were, so the model would quietly contradict its own
+        description -- and a loss or decoder built from these numbers would
+        unpack the wrong channels. Build a new instance instead.
+        """
+        if not self._layers_built or old == new:
+            return
+        raise AttributeError(
+            f'{attr_name} is fixed once the model is built: it is {old!r} '
+            f'and was asked to become {new!r}. It determined the layer '
+            f'shapes of this instance, so changing it now would leave the '
+            f'built layers, and any weights loaded into them, disagreeing '
+            f'with what the model reports. Construct a new '
+            f'{type(self).__name__} instead.')
+
+    @property
     def input_shape(self):
         """(H, W, C) this model instance was built for."""
         return self._input_shape
@@ -80,6 +123,10 @@ class YOLOv2Tiny(tf.keras.Model):
     def input_shape(self,input_shape:tuple):
         if input_shape is not None:
             input_shape = tuple(input_shape)
+        # Compared AFTER normalizing, so restating (120,160,2) as a list is
+        # not mistaken for a change.
+        self._reject_change_after_build(
+            'input_shape', getattr(self, '_input_shape', None), input_shape)
         self._input_shape = input_shape
 
     @property
@@ -89,6 +136,8 @@ class YOLOv2Tiny(tf.keras.Model):
     def num_anchors(self,num_anchors:int):
         if num_anchors is not None:
             num_anchors = int(num_anchors)
+        self._reject_change_after_build(
+            'num_anchors', getattr(self, '_num_anchors', None), num_anchors)
         self._num_anchors = num_anchors
 
     @property
@@ -98,6 +147,8 @@ class YOLOv2Tiny(tf.keras.Model):
     def num_classes(self,num_classes:int):
         if num_classes is not None:
             num_classes = int(num_classes)
+        self._reject_change_after_build(
+            'num_classes', getattr(self, '_num_classes', None), num_classes)
         self._num_classes = num_classes
         
     @property
