@@ -755,7 +755,9 @@ class AnnotatedVideo:
                 aframe._annotations = annot.drop(annot[annot.outside == True].index)
             except:
                 pass
-            # Check if any annotations hugs any border
+            
+            # Check if any annotations hugs any border if boxes add borders are
+            # not supposed to be included
             if include_fringes is not True:
                 h,w = aframe.image.shape 
                 
@@ -764,6 +766,9 @@ class AnnotatedVideo:
                     continue
                 else:
                     tf_frames.append(aframe)
+                    
+            else:
+                tf_frames.append(aframe)
                     
         # Calculate and print the percentage of excluded frames
         perc_excluded = (1 - len(tf_frames) / len(self.frames))*100
