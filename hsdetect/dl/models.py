@@ -176,6 +176,49 @@ class YOLOv2Tiny(tf.keras.Model):
         return output_shape
 
    
+    @property
+    def backbone_trainable(self) -> bool:
+        """True while every backbone layer is trainable (the default)."""
+        return all(layer.trainable for layer in self.backbone)
+
+    def set_backbone_trainable(self, trainable: bool) -> None:
+        """Freeze or unfreeze every backbone layer, leaving the head alone.
+
+        Freezing does two things, both wanted for a training phase that
+        fits only the class channels:
+
+          - the backbone's weights stop receiving updates. They drop out
+            of model.trainable_variables, so the optimizer never builds
+            slots for them and never touches them;
+          - its BatchNorm layers switch to inference behaviour and use
+            their stored moving statistics rather than the batch's, so
+            the features a frozen backbone produces do not drift with
+            the composition of each batch.
+
+        The detection head stays trainable, and that is NOT by itself
+        enough to restrict training to the class channels: the head is
+        one 1x1 convolution whose filters produce the box, objectness
+        and class channels together. The LOSS has to do the restricting,
+        by switching its localization and confidence terms off. With
+        those off, the box and objectness filters receive a zero
+        gradient and come through the phase unchanged.
+
+        With the backbone frozen, the class channels have
+        num_classes * num_anchors * C_in weights and num_classes *
+        num_anchors biases between them -- a linear probe on fixed
+        features. That is the point of a separate phase: a probe that
+        small cannot memorize individual recordings the way the whole
+        network can.
+        """
+        if getattr(self, 'backbone', None) is None:
+            raise RuntimeError(
+                'The model has no backbone yet, so build_model() has not '
+                'run. Set input_shape, num_anchors and num_classes '
+                'first.')
+
+        for layer in self.backbone:
+            layer.trainable = bool(trainable)
+
     def get_config(self):
         config = super().get_config()
         config.update({
