@@ -55,7 +55,7 @@ engine_pipeline[5]['dl_model'] = (dir_out / 'YOLOv2Tiny8X.keras').as_posix()
 # %% Add the pose estimator if required
 if ADD_POSTURE_ENGINE:
     
-    param_dict = 'H:/PersonDetectionModels/PureSec/pose_estimation/PoseEstimator_HistGradientBoosting_with_ralign.pkl'
+    param_dict = SCRIPT_DIR / 'models' / 'PoseClassifier' / 'PoseEstimator_HistGradientBoosting_with_ralign.pkl'
     
     with open(param_dict,'rb') as f:
         pose_estimator_params = pkl.load(f)
