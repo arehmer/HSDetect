@@ -7,9 +7,14 @@ Created on Mon Jan 15 10:36:43 2024
 
 from sklearn.svm import LinearSVC, SVC
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.utils.validation import _is_fitted
-from sklearn.preprocessing import scale
+from sklearn.utils.validation import _is_fitted, has_fit_parameter
+from sklearn.base import BaseEstimator, clone
+from sklearn.metrics import balanced_accuracy_score
+from sklearn.pipeline import Pipeline
+import sklearn
 
+import importlib
+import platform
 import typing
 import pickle as pkl
 from pathlib import Path
@@ -33,6 +38,10 @@ def build_classifier_engine(**kwargs):
         return ClassEngineSVC(**kwargs)
     elif name == 'RandomForest':
         return RandomForest(**kwargs)
+    elif name == 'BoxPoseClassifier':
+        return BoxPoseClassifier(**kwargs)
+    else:
+        print(f"Classifier {name} not known!")
 
 import ast       
 def get_classes():
@@ -558,161 +567,319 @@ class ClassEngineSVC(ClassEngineLinSVM_CV):
         
         return self.svm_py.score(X,y)
 
-# class OpenCV_SVM(classifier_engine):
-#     '''
-#     Uses the OpenCV implementation of a Kernel Support Vector Machine
-#     https://docs.opencv.org/4.x/d1/d2d/classcv_1_1ml_1_1SVM.html
-#     '''
-    
-#     _name = 'OpenCV_SVM'
-    
-#     def __init__(self,**kwargs):
-#         """
-#         OpenCV_SVM needs its own initialization function, because OpenCV
-#         objects do not posses the __dict__ function to return all class
-#         attributes. Instead of assigning all class attributes using 
-#         setattr() an entirelly new object has to be created.
+# ---------------------------------------------------------------------------
+# Helpers for BoxPoseClassifier
+# ---------------------------------------------------------------------------
 
-#         Parameters
-#         ----------
-#         **kwargs : TYPE
-#             DESCRIPTION.
+# Conversion between fitted scikit-learn estimators and dictionaries:
+#     {"class": "<module>.<ClassName>",
+#      "params": {hyperparameters, i.e. get_params(deep=False)},
+#      "fitted": {learned attributes}}
+# with nested estimators wrapped as {"__estimator__": {...}}.
+# This is the same format as estimator_to_dict() in the training code
+# (pose_estimation/func.py). Keep both copies in sync if it ever changes.
 
-#         Returns
-#         -------
-#         None.
+_ESTIMATOR_KEY = "__estimator__"
 
-#         """
-#         # Mapping from readable words for normal humans to the flag-based 
-#         # clusterfuck of C++
-#         kernel_types = {'linear':cv2.ml.SVM_LINEAR,
-#                         'poly':cv2.ml.SVM_POLY,
-#                         'rbf':cv2.ml.SVM_RBF,
-#                         'sigmoid':cv2.ml.SVM_SIGMOID,
-#                         'chi2':cv2.ml.SVM_CHI2,
-#                         'inter':cv2.ml.SVM_INTER}
-                
-#         self.kernel_type = kernel_types[kwargs.pop('kernel_type','rbf')]
+
+def _to_plain(obj):
+    if isinstance(obj, BaseEstimator):
+        return {_ESTIMATOR_KEY: estimator_to_dict(obj)}
+    if isinstance(obj, list):
+        return [_to_plain(o) for o in obj]
+    if isinstance(obj, tuple):
+        return tuple(_to_plain(o) for o in obj)
+    if isinstance(obj, dict):
+        return {k: _to_plain(v) for k, v in obj.items()}
+    return obj
+
+
+def _from_plain(obj):
+    if isinstance(obj, dict):
+        if set(obj) == {_ESTIMATOR_KEY}:
+            return estimator_from_dict(obj[_ESTIMATOR_KEY])
+        return {k: _from_plain(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_from_plain(o) for o in obj]
+    if isinstance(obj, tuple):
+        return tuple(_from_plain(o) for o in obj)
+    return obj
+
+
+def estimator_to_dict(est: BaseEstimator) -> dict:
+    """Fitted estimator -> {"class", "params", "fitted"}."""
+    cls = type(est)
+    params = est.get_params(deep=False)
+    state = est.__getstate__()
+    fitted = {k: v for k, v in state.items() if k not in params}
+    return {"class": f"{cls.__module__}.{cls.__qualname__}",
+            "params": _to_plain(params),
+            "fitted": _to_plain(fitted)}
+
+
+def estimator_from_dict(d: dict) -> BaseEstimator:
+    """{"class", "params", "fitted"} -> fitted estimator. Needs the same
+    scikit-learn version it was saved with; scikit-learn warns otherwise."""
+    module_name, _, class_name = d["class"].rpartition(".")
+    cls = getattr(importlib.import_module(module_name), class_name)
+    est = cls(**_from_plain(d["params"]))
+    est.__setstate__(_from_plain(d["fitted"]))
+    return est
+
+
+def _versions() -> dict:
+    return {"python": platform.python_version(), "numpy": np.__version__,
+            "pandas": pd.__version__, "sklearn": sklearn.__version__}
+
+
+def compute_box_features(bboxes: pd.DataFrame, frame_size: tuple) -> pd.DataFrame:
+    """
+    Box geometry features, computed exactly as add_features() in the training
+    code (pose_estimation/func.py). If features are added or changed there,
+    mirror the change here, or the engine will see different inputs than the
+    model was trained on.
+
+    Needs columns xtl, ytl, xbr, ybr; w and h are used if present, otherwise
+    computed as xbr - xtl and ybr - ytl.
+    """
+    b = bboxes
+    xtl, ytl = b["xtl"].astype(float), b["ytl"].astype(float)
+    xbr, ybr = b["xbr"].astype(float), b["ybr"].astype(float)
+    w = b["w"].astype(float) if "w" in b else xbr - xtl
+    h = b["h"].astype(float) if "h" in b else ybr - ytl
+    frame_w, frame_h = frame_size
+
+    long_side = np.maximum(w, h)
+    short_side = np.minimum(w, h)
+
+    # Offset of the box center from the frame center; cos2phi = cos(2*phi)
+    # of its direction, 0 at the center itself (see add_features in func.py)
+    dx = (xtl + xbr) / 2 - frame_w / 2
+    dy = (ytl + ybr) / 2 - frame_h / 2
+    r2 = dx**2 + dy**2
+    cos2phi = np.where(r2 > 0, (dx**2 - dy**2) / r2.where(r2 > 0, 1), 0.0)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ratio_log = np.log(w / h)
+        return pd.DataFrame({
+            "w": w,
+            "h": h,
+            "d": np.hypot(dx, dy),
+            "ratio": w / h,
+            "ratio_log": ratio_log,
+            "ratio_norm": long_side / short_side,
+            "ratio_normlog": np.log(long_side / short_side),
+            "area": long_side * short_side,
+            "cos2phi": cos2phi,
+            "radial_align": ratio_log * cos2phi,
+        }, index=b.index)
+
+
+BOX_FEATURES = ("d", "ratio", "ratio_log", "ratio_norm", "ratio_normlog", "area",
+                "cos2phi", "radial_align")
+
+class BoxPoseClassifier(ClassifierEngine):
+    """
+    Classifies person bounding boxes as lying / non-lying from box geometry
+    alone (distance to frame center, area, aspect ratio). The features are
+    computed from the boxes themselves, so the X argument of predict() and
+    decision_function() is ignored.
+
+    Built only from the dictionary exported by 03_classify.py:
+
+        with open('box_pose_classifier.pkl', 'rb') as f:
+            engine = build_classifier_engine(**pkl.load(f))
+
+    save() returns a dictionary of the same shape.
+
+    Results are added as new columns; existing columns, such as a detection
+    score or label, are left untouched:
+        pose_score : P(lying) - threshold, >= 0 means lying
+        pose_label : 1 = lying, 0 = non-lying,
+                     -1 = box with zero width or height (not classified)
+
+    Inference runs in Python only; the stored model needs the scikit-learn
+    version it was trained with (see the versions property).
+    """
+
+    name = 'BoxPoseClassifier'
+
+    _REQUIRED = ('estimator', 'threshold', 'features', 'frame_size')
+
+    def __init__(self, **kwargs):
+        missing = [k for k in self._REQUIRED if k not in kwargs]
+        if missing:
+            raise KeyError(f"BoxPoseClassifier is missing {missing}. Build it from "
+                           f"the dictionary exported by 03_classify.py.")
+
+        self.estimator = kwargs.pop('estimator')
+        self.threshold = kwargs.pop('threshold')
+        self.features = kwargs.pop('features')
+        self.frame_size = kwargs.pop('frame_size')
+        self.positive_label = kwargs.pop('positive_label', 'lying')
+        self.model_name = kwargs.pop('model_name', '')
+        self.versions = kwargs.pop('versions', {})
+        self.metadata = kwargs.pop('metadata', {})
+
+        self.initialize_py_instance(**kwargs)
+
+    @property
+    def estimator(self):
+        return self._estimator
+    @estimator.setter
+    def estimator(self, estimator: dict):
+        if not (isinstance(estimator, dict) and {'class', 'params', 'fitted'} <= set(estimator)):
+            raise TypeError("estimator must be a dict with keys 'class', 'params', 'fitted'")
+        self._estimator = estimator
+
+    @property
+    def threshold(self):
+        return self._threshold
+    @threshold.setter
+    def threshold(self, threshold: float):
+        self._threshold = float(threshold)
+
+    @property
+    def features(self):
+        return self._features
+    @features.setter
+    def features(self, features: list):
+        features = [str(f) for f in features]
+        unknown = [f for f in features if f not in BOX_FEATURES]
+        if unknown:
+            raise ValueError(f"Unknown features {unknown}; available: {list(BOX_FEATURES)}")
+        self._features = features
+
+    @property
+    def frame_size(self):
+        return self._frame_size
+    @frame_size.setter
+    def frame_size(self, frame_size: tuple):
+        w, h = frame_size
+        self._frame_size = (int(w), int(h))
+
+    @property
+    def positive_label(self):
+        return self._positive_label
+    @positive_label.setter
+    def positive_label(self, positive_label: str):
+        self._positive_label = str(positive_label)
+
+    @property
+    def model_name(self):
+        return self._model_name
+    @model_name.setter
+    def model_name(self, model_name: str):
+        self._model_name = str(model_name)
+
+    @property
+    def versions(self):
+        return self._versions
+    @versions.setter
+    def versions(self, versions: dict):
+        self._versions = dict(versions)
+
+    @property
+    def metadata(self):
+        return self._metadata
+    @metadata.setter
+    def metadata(self, metadata: dict):
+        self._metadata = dict(metadata)
         
-#         # Mapping from readable words for normal humans to the flag-based 
-#         # clusterfuck of C++
-#         svm_types = {'C_SVC':cv2.ml.SVM_C_SVC,
-#                      'NU_SVC':cv2.ml.SVM_NU_SVC,
-#                      'ONE_CLASS':cv2.ml.SVM_ONE_CLASS,
-#                      'EPS_SVR':cv2.ml.SVM_EPS_SVR,
-#                      'NU_SVR':cv2.ml.SVM_NU_SVR}
+    def __call__(self, bboxes : pd.DataFrame):
         
-        
-#         self.svm_type = svm_types[kwargs.pop('svm_type','C_SVC')]
-        
-#         self._svm = self._init_svm(**kwargs)
-        
-#     def _init_svm(self,**kwargs):
-#         """
-#         This class generates the svm object and returns it
+        return self.predict(None, bboxes)
 
-#         Parameters
-#         ----------
-#         **kwargs : TYPE
-#             DESCRIPTION.
+    def initialize_py_instance(self, **kwargs):
+        # Rebuild the trained scikit-learn model from its dictionary.
+        # Not a property, so save() stores the dictionary, not this object.
+        self.classifier_py = estimator_from_dict(self.estimator)
 
-#         Returns
-#         -------
-#         None.
+        n_in = getattr(self.classifier_py, 'n_features_in_', None)
+        if n_in is not None and n_in != len(self.features):
+            raise ValueError(f"Stored model expects {n_in} features, "
+                             f"but features lists {len(self.features)}: {self.features}")
 
-#         """
-        
-#         svm = cv2.ml.SVM_create()
+    def _positive_index(self) -> int:
+        # The training script encodes lying as 1, non-lying as 0
+        return int(np.flatnonzero(self.classifier_py.classes_ == 1)[0])
 
-#         svm.setType(self.svm_type)
-#         svm.setKernel(self.kernel_type)
-#         # svm.setTermCriteria((cv2.TERM_CRITERIA_MAX_ITER, 1000, 1e-8))
+    @staticmethod
+    def _to_pandas(bboxes) -> pd.DataFrame:
+        if isinstance(bboxes, pd.Series):        # a single box
+            return bboxes.to_frame().T
+        if isinstance(bboxes, pd.DataFrame):
+            return bboxes.copy()
+        return cv2_to_pd_DataFrame(bboxes)       # cv2.htpa.DataFrame
 
-#         return svm  
-    
-#     def fit(self,X:np.ndarray,y:np.ndarray):
-#         '''
-#         This function is called by the user or other functions to fit the 
-#         parameters of the SVM.
-#         In this case trainAuto() is used for parameter optimization, which
-#         automatically performs cross-validation and varies the hyperparameters 
-#         to find an optimal setting 
+    def features_from_bboxes(self, bboxes) -> tuple:
+        """
+        Returns (X, valid): the feature matrix in the order of self.features,
+        and a boolean mask of boxes with nonzero width and height. Rows of
+        X for invalid boxes contain inf/NaN and must not be passed to the model.
+        """
+        feats = compute_box_features(self._to_pandas(bboxes), self.frame_size)
+        valid = ((feats["w"] > 0) & (feats["h"] > 0)).to_numpy()
+        return feats[self.features].to_numpy(dtype=float), valid
 
-#         Parameters
-#         ----------
-#         X : np.ndarray
-#             DESCRIPTION.
-#         y : np.ndarray : TYPE
-#             DESCRIPTION.
+    def predict(self,
+                X: np.ndarray,
+                bboxes: pd.Series | pd.DataFrame | cv2.htpa.DataFrame):
+        """X is ignored; features are computed from bboxes."""
+        return self.decision_function(X, bboxes)
 
-#         Returns
-#         -------
-#         None.
+    def decision_function(self,
+                          X: np.ndarray,
+                          bboxes: pd.Series | pd.DataFrame | cv2.htpa.DataFrame):
+        """X is ignored; features are computed from bboxes."""
+        bboxes_pred = self._to_pandas(bboxes)
+        X_box, valid = self.features_from_bboxes(bboxes_pred)
 
-#         '''
-        
-#         # Cast data to the format that OpenCV likes
-#         X = X.astype(np.float32)
-#         y = y.astype(np.int32).reshape((-1,1))
-        
-        
-#         # Set hyperparameters the same way sklearn does (because opencv svm)
-#         # sucks
-#         Cgrid = cv2.ml.SVM.getDefaultGridPtr(cv2.ml.SVM_C)
-#         Cgrid.minVal = 1
-#         Cgrid.maxVal = Cgrid.minVal
-        
-#         gammaGrid = cv2.ml.SVM.getDefaultGridPtr(cv2.ml.SVM_GAMMA)
-#         gammaGrid.minVal = 1/(X.shape[1] * X.var())
-#         gammaGrid.maxVal = gammaGrid.minVal
-        
-#         # Fit the SVM
-#         self._svm.trainAuto(samples = X,
-#                             layout = cv2.ml.ROW_SAMPLE,
-#                             responses = y,
-#                             Cgrid = Cgrid,
-#                             gammaGrid = gammaGrid)
-#         # self._svm.trainAuto(samples = X,
-#         #                     layout = cv2.ml.ROW_SAMPLE,
-#         #                     responses = y)
+        score = np.full(len(bboxes_pred), np.nan)
+        label = np.full(len(bboxes_pred), -1, dtype=int)
+        if valid.any():
+            prob = self.classifier_py.predict_proba(X_box[valid])[:, self._positive_index()]
+            score[valid] = prob - self.threshold
+            label[valid] = (prob >= self.threshold).astype(int)
 
-#     def score(self,X,y):
-#         return 0
-    
-#     def decision_function(self,X):
-        
-#         # Cast data to the format that OpenCV likes
-#         X = X.astype(np.float32)
+        bboxes_pred['pose_score'] = score
+        bboxes_pred['pose_label'] = label
 
-#         # Set flag=1 to return the raw output (=distance to hyperplane) instead
-#         # of the class label. See here for documentation of flags:
-#         # https://docs.opencv.org/4.8.0/db/d7d/classcv_1_1ml_1_1StatModel.html#af1ea864e1c19796e6264ebb3950c0b9a
-#         retval,y = self._svm.predict(X,flags=1)  
-        
-#         return y  
-        
-#     def save(self) -> dict:
-#         """
-#         Returns all non-private an non-builtin attributes of this class
-#         as a dictionary with the purpose of reloading this instance from the
-#         attribute dictionary. 
+        return bboxes_pred
 
-#         Parameters
-#         ----------
-#         folder : Path
-#             DESCRIPTION.
+    def fit(self, X, y, w=None):
+        """
+        Refits the model with its stored hyperparameters. The stored threshold
+        is kept, since choosing a new one needs separate validation data.
 
-#         Returns
-#         -------
-#         dict
-#             DESCRIPTION.
+        X : features in the order of self.features, e.g. from
+            features_from_bboxes() (drop rows where valid is False)
+        y : 1 / 0, or pose strings compared against positive_label
+        w : optional sample weights
 
-#         """
-        
-#         attr_dict = { k:v for k,v in vars(self).items() if not k.startswith('_') }
+        Returns the balanced accuracy on (X, y) at the stored threshold.
+        """
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y)
+        if y.dtype.kind in 'OUS':
+            y = (y == self.positive_label).astype(int)
 
-#         return attr_dict
+        model = clone(self.classifier_py)
+        final = model.steps[-1][1] if isinstance(model, Pipeline) else model
+        if w is not None and not has_fit_parameter(final, "sample_weight"):
+            raise ValueError(f"{type(final).__name__} does not support sample weights; call fit() without w")
 
+        if w is None:
+            model.fit(X, y)
+        elif isinstance(model, Pipeline):
+            model.fit(X, y, **{f"{model.steps[-1][0]}__sample_weight": w})
+        else:
+            model.fit(X, y, sample_weight=w)
 
-        
-        
+        # Keep the saved dictionary in step with the refitted model
+        self.classifier_py = model
+        self.estimator = estimator_to_dict(model)
+        self.versions = _versions()
+
+        prob = model.predict_proba(X)[:, self._positive_index()]
+        return balanced_accuracy_score(y, (prob >= self.threshold).astype(int))
