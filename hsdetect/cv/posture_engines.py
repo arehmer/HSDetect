@@ -450,9 +450,12 @@ class PostureNetEngine(Engine):
         alarm = (majority == 'lying'
                  and motion is not None and motion < self.alarm_motion)
 
+        # frame_nobg is kept so a consumer can display or log exactly the
+        # frame the network saw, without subtracting the background a second
+        # time and risking a different result than the one just classified.
         self.last.update({'tag': tag, 'conf': conf, 'E_k': e_k, 'probs': probs,
                           'majority': majority, 'motion': motion,
-                          'alarm': alarm})
+                          'alarm': alarm, 'frame_nobg': frame_no_bg})
 
         return self.decode(tag, conf, e_k, probs, majority, motion, alarm)
 
