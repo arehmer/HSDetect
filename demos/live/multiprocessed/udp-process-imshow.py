@@ -43,7 +43,7 @@ from hsdetect.ipc.processes import InferenceProcess
 from hspy.ipc.threads_base import RThread
 
 
-
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 # %% Create an argument parser to enable passing arguments from the
 # command line to this script
@@ -115,7 +115,7 @@ if __name__ == '__main__':
     
     # Create instance of the InferenceProcess
     inf_process = InferenceProcess(name = 'inference_process',
-                                   inference_engine_dir = 'C:/Users/Rehmer/Documents/GitHub/HSDetect/demos/live/multiprocessed/models/v14_sgd_live',
+                                   inference_engine_dir = SCRIPT_DIR / 'models' / 'v14_sgd_live',
                                    read_buffer = udp_buffer,
                                    write_buffer = process_buffer)
 
