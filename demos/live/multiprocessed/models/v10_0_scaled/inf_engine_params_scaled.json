@@ -1,0 +1,60 @@
+{
+  "engines": [
+    {
+      "K": 2,
+      "S": 2,
+      "SensorType": 2,
+      "a": 1,
+      "eps": 3,
+      "name": "PreprocEngAWA"
+    },
+    {
+      "SensorType": 2,
+      "name": "ZeroCorners"
+    },
+    {
+      "N_init": 30,
+      "SensorType": 2,
+      "bg": null,
+      "bg_mask": null,
+      "box_pad": 5,
+      "decay": 0.95,
+      "stack_raw": true,
+      "thresh_update": 10,
+      "name": "BackgroundSub"
+    },
+    {
+      "SensorType": 2,
+      "name": "MedianSub"
+    },
+    {
+      "SensorType": 2,
+      "factor": 0.6,
+      "name": "ShrinkCenter"
+    },
+    {
+      "SensorType": 2,
+      "dl_model": "YOLOv2Tiny8X.keras",
+      "name": "DLEngine"
+    },
+    {
+      "SensorType": 2,
+      "yolo_anchors": {
+        "ndarray": [
+          [14.0, 13.0],
+          [18.0, 21.0],
+          [25.0, 18.0]
+        ],
+        "dtype": "<f8"
+      },
+      "yolo_grid_size": [15, 20],
+      "yolo_n_classes": 0,
+      "name": "YOLO_EnDecode_Engine"
+    },
+    {
+      "SensorType": 2,
+      "name": "BoxRescale"
+    }
+  ],
+  "name": "InferenceEngine"
+}

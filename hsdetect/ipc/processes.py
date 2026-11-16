@@ -2,7 +2,6 @@ import time
 import traceback
 from pathlib import Path
 import warnings
-import pickle as pkl
 import numpy as np
 import cv2
 
@@ -14,6 +13,7 @@ from hsdetect.cv.tracktors import build_tracktor
 from hsdetect.cv.inf_engines import InferenceEngine
 
 from hsdetect import build_engine
+from hsdetect.engine_io import find_engine_params_file, load_engine_params
 
 from hspy.ipc.processes import RProcess_R1, RWProcess_R1
 
@@ -149,30 +149,19 @@ class InferenceProcess(RWProcess_R1):
         
     def _setup(self,):
         
-        # Build the model from the directory given
-        # 1. Look for a .dict file that contains the inference engine para-
-        # meters
-        for file in self.inference_engine_dir.iterdir():
-            
-            if file.suffix == '.dict':
-                
-                with open(file,'rb') as io:
-                    inf_engine_params = pkl.load(io)
-                    
-                # The model is expected to lie next to the .dict, so only its file name is used.
-                for engine_params in inf_engine_params.get('engines', []):
-                    dl_model = engine_params.get('dl_model')
-                    if engine_params.get('name') == 'DLEngine' and \
-                        isinstance(dl_model, (str, Path)):
-                        dl_model = self.inference_engine_dir / Path(dl_model).name
-                        engine_params['dl_model'] = dl_model.as_posix()
-                
-                try:
-                    self.inference_engine = build_engine(**inf_engine_params)
-                    print(f'Built inference engine with engines: {self.inference_engine.engine_names}.')
-                except Exception:
-                    print(f'[{self.name}] Failed to build inference engine from {file}:')
-                    traceback.print_exc()
+        # Build the model from the parameter file (.json) in the directory
+        # given. Model paths in it are relative to the directory, see
+        # hsdetect.engine_io.load_engine_params().
+        try:
+            file = find_engine_params_file(self.inference_engine_dir)
+            inf_engine_params = load_engine_params(file)
+            self.inference_engine = build_engine(**inf_engine_params)
+            print(f'Built inference engine from {file.name} with engines: '
+                  f'{self.inference_engine.engine_names}.')
+        except Exception:
+            print(f'[{self.name}] Failed to build inference engine from '
+                  f'{self.inference_engine_dir}:')
+            traceback.print_exc()
                 
         if self.inference_engine is None:
             raise RuntimeError('Was not able to build inference engine from ' + \
@@ -225,7 +214,7 @@ class PostureInferenceProcess(RWProcess_R1):
         estimation and removal, so this process hands it the raw frame and
         there is no BackgroundSub / ZeroCorners / decode stage to wire up.
       * The engine is built from a parameter dict rather than from a saved
-        pipeline, although a directory holding a pickled '.dict' is
+        pipeline, although a directory holding a parameter '.json' is
         accepted too, the way InferenceProcess takes one.
 
     As in CVProcess, the engine is constructed inside the child process and
@@ -259,9 +248,10 @@ class PostureInferenceProcess(RWProcess_R1):
             Everything PostureNetEngine takes may be set here (bg_frames,
             motion_gap, alarm_motion, background, device, ...).
         engine_dir : Path
-            Alternative to engine_dict: a directory holding a pickled
-            '.dict' of those same parameters, as written by
-            PostureNetEngine.save(). Mirrors InferenceProcess.
+            Alternative to engine_dict: a directory holding a '.json' of
+            those same parameters, as written by
+            hsdetect.engine_io.save_engine_params(PostureNetEngine.save()).
+            Mirrors InferenceProcess.
         ArrayType, SensorType : int
             Used only to reshape a flat incoming frame, as CVProcess does.
             Optional: without either, the engine reshapes the frame itself
@@ -321,15 +311,8 @@ class PostureInferenceProcess(RWProcess_R1):
         self.t0 = time.time()
 
     def _params_from_dir(self) -> dict:
-        """Load the engine parameters from the first '.dict' in engine_dir."""
-
-        for file in sorted(self.engine_dir.iterdir()):
-            if file.suffix == '.dict':
-                with open(file, 'rb') as io:
-                    return pkl.load(io)
-
-        raise RuntimeError(f'No .dict with engine parameters found in '
-                           f'{self.engine_dir}.')
+        """Load the engine parameters from the first '.json' in engine_dir."""
+        return load_engine_params(find_engine_params_file(self.engine_dir))
 
     def _target(self):
 

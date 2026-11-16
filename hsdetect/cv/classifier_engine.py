@@ -7,14 +7,8 @@ Created on Mon Jan 15 10:36:43 2024
 
 from sklearn.svm import LinearSVC, SVC
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.utils.validation import _is_fitted, has_fit_parameter
-from sklearn.base import BaseEstimator, clone
-from sklearn.metrics import balanced_accuracy_score
-from sklearn.pipeline import Pipeline
-import sklearn
+from sklearn.utils.validation import _is_fitted
 
-import importlib
-import platform
 import typing
 import pickle as pkl
 from pathlib import Path
@@ -24,6 +18,7 @@ import pandas as pd
 
 
 from .misc import pd_to_cv2_htpa_DataFrame, cv2_to_pd_DataFrame
+from .sklearn_portable_classifiers import model_from_dict, read_box_pose_classifier_json
 
 from hsdetect import Engine
 
@@ -571,67 +566,6 @@ class ClassEngineSVC(ClassEngineLinSVM_CV):
 # Helpers for BoxPoseClassifier
 # ---------------------------------------------------------------------------
 
-# Conversion between fitted scikit-learn estimators and dictionaries:
-#     {"class": "<module>.<ClassName>",
-#      "params": {hyperparameters, i.e. get_params(deep=False)},
-#      "fitted": {learned attributes}}
-# with nested estimators wrapped as {"__estimator__": {...}}.
-# This is the same format as estimator_to_dict() in the training code
-# (pose_estimation/func.py). Keep both copies in sync if it ever changes.
-
-_ESTIMATOR_KEY = "__estimator__"
-
-
-def _to_plain(obj):
-    if isinstance(obj, BaseEstimator):
-        return {_ESTIMATOR_KEY: estimator_to_dict(obj)}
-    if isinstance(obj, list):
-        return [_to_plain(o) for o in obj]
-    if isinstance(obj, tuple):
-        return tuple(_to_plain(o) for o in obj)
-    if isinstance(obj, dict):
-        return {k: _to_plain(v) for k, v in obj.items()}
-    return obj
-
-
-def _from_plain(obj):
-    if isinstance(obj, dict):
-        if set(obj) == {_ESTIMATOR_KEY}:
-            return estimator_from_dict(obj[_ESTIMATOR_KEY])
-        return {k: _from_plain(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_from_plain(o) for o in obj]
-    if isinstance(obj, tuple):
-        return tuple(_from_plain(o) for o in obj)
-    return obj
-
-
-def estimator_to_dict(est: BaseEstimator) -> dict:
-    """Fitted estimator -> {"class", "params", "fitted"}."""
-    cls = type(est)
-    params = est.get_params(deep=False)
-    state = est.__getstate__()
-    fitted = {k: v for k, v in state.items() if k not in params}
-    return {"class": f"{cls.__module__}.{cls.__qualname__}",
-            "params": _to_plain(params),
-            "fitted": _to_plain(fitted)}
-
-
-def estimator_from_dict(d: dict) -> BaseEstimator:
-    """{"class", "params", "fitted"} -> fitted estimator. Needs the same
-    scikit-learn version it was saved with; scikit-learn warns otherwise."""
-    module_name, _, class_name = d["class"].rpartition(".")
-    cls = getattr(importlib.import_module(module_name), class_name)
-    est = cls(**_from_plain(d["params"]))
-    est.__setstate__(_from_plain(d["fitted"]))
-    return est
-
-
-def _versions() -> dict:
-    return {"python": platform.python_version(), "numpy": np.__version__,
-            "pandas": pd.__version__, "sklearn": sklearn.__version__}
-
-
 def compute_box_features(bboxes: pd.DataFrame, frame_size: tuple) -> pd.DataFrame:
     """
     Box geometry features, computed exactly as add_features() in the training
@@ -685,12 +619,14 @@ class BoxPoseClassifier(ClassifierEngine):
     computed from the boxes themselves, so the X argument of predict() and
     decision_function() is ignored.
 
-    Built only from the dictionary exported by 03_classify.py:
+    Built from a classifier JSON file (see sklearn_portable_classifiers.py),
+    which holds the trained model and its settings (threshold, features,
+    frame_size, positive_label):
 
-        with open('box_pose_classifier.pkl', 'rb') as f:
-            engine = build_classifier_engine(**pkl.load(f))
+        engine = build_classifier_engine(name='BoxPoseClassifier',
+                                         model_file='PoseEstimator.json')
 
-    save() returns a dictionary of the same shape.
+    save() returns only {'name', 'model_file'}, i.e. a reference to the file.
 
     Results are added as new columns; existing columns, such as a detection
     score or label, are left untouched:
@@ -698,39 +634,33 @@ class BoxPoseClassifier(ClassifierEngine):
         pose_label : 1 = lying, 0 = non-lying,
                      -1 = box with zero width or height (not classified)
 
-    Inference runs in Python only; the stored model needs the scikit-learn
-    version it was trained with (see the versions property).
+    Inference needs only numpy. To retrain, use the training code and
+    export the new model to JSON again.
     """
 
     name = 'BoxPoseClassifier'
 
-    _REQUIRED = ('estimator', 'threshold', 'features', 'frame_size')
+    def __init__(self, model_file):
 
-    def __init__(self, **kwargs):
-        missing = [k for k in self._REQUIRED if k not in kwargs]
-        if missing:
-            raise KeyError(f"BoxPoseClassifier is missing {missing}. Build it from "
-                           f"the dictionary exported by 03_classify.py.")
+        self.model_file = Path(model_file)
+        data = read_box_pose_classifier_json(self.model_file)
 
-        self.estimator = kwargs.pop('estimator')
-        self.threshold = kwargs.pop('threshold')
-        self.features = kwargs.pop('features')
-        self.frame_size = kwargs.pop('frame_size')
-        self.positive_label = kwargs.pop('positive_label', 'lying')
-        self.model_name = kwargs.pop('model_name', '')
-        self.versions = kwargs.pop('versions', {})
-        self.metadata = kwargs.pop('metadata', {})
+        self.threshold = data['threshold']
+        self.features = data['features']
+        self.frame_size = data['frame_size']
+        self.positive_label = data.get('positive_label', 'lying')
 
-        self.initialize_py_instance(**kwargs)
+        # For information only
+        self.model_name = data.get('model_name', '')
+        self.versions = data.get('versions', {})
+        self.metadata = data.get('metadata', {})
 
-    @property
-    def estimator(self):
-        return self._estimator
-    @estimator.setter
-    def estimator(self, estimator: dict):
-        if not (isinstance(estimator, dict) and {'class', 'params', 'fitted'} <= set(estimator)):
-            raise TypeError("estimator must be a dict with keys 'class', 'params', 'fitted'")
-        self._estimator = estimator
+        # Not a property, so save() does not store it
+        self.classifier_py = model_from_dict(data['model'])
+        if self.classifier_py.n_features_in_ != len(self.features):
+            raise ValueError(f"Stored model expects {self.classifier_py.n_features_in_} "
+                             f"features, but features lists {len(self.features)}: "
+                             f"{self.features}")
 
     @property
     def threshold(self):
@@ -758,47 +688,12 @@ class BoxPoseClassifier(ClassifierEngine):
         w, h = frame_size
         self._frame_size = (int(w), int(h))
 
-    @property
-    def positive_label(self):
-        return self._positive_label
-    @positive_label.setter
-    def positive_label(self, positive_label: str):
-        self._positive_label = str(positive_label)
-
-    @property
-    def model_name(self):
-        return self._model_name
-    @model_name.setter
-    def model_name(self, model_name: str):
-        self._model_name = str(model_name)
-
-    @property
-    def versions(self):
-        return self._versions
-    @versions.setter
-    def versions(self, versions: dict):
-        self._versions = dict(versions)
-
-    @property
-    def metadata(self):
-        return self._metadata
-    @metadata.setter
-    def metadata(self, metadata: dict):
-        self._metadata = dict(metadata)
-        
     def __call__(self, bboxes : pd.DataFrame):
         
         return self.predict(None, bboxes)
 
-    def initialize_py_instance(self, **kwargs):
-        # Rebuild the trained scikit-learn model from its dictionary.
-        # Not a property, so save() stores the dictionary, not this object.
-        self.classifier_py = estimator_from_dict(self.estimator)
-
-        n_in = getattr(self.classifier_py, 'n_features_in_', None)
-        if n_in is not None and n_in != len(self.features):
-            raise ValueError(f"Stored model expects {n_in} features, "
-                             f"but features lists {len(self.features)}: {self.features}")
+    def save(self):
+        return {'name': self.name, 'model_file': self.model_file.as_posix()}
 
     def _positive_index(self) -> int:
         # The training script encodes lying as 1, non-lying as 0
@@ -846,40 +741,3 @@ class BoxPoseClassifier(ClassifierEngine):
         bboxes_pred['pose_label'] = label
 
         return bboxes_pred
-
-    def fit(self, X, y, w=None):
-        """
-        Refits the model with its stored hyperparameters. The stored threshold
-        is kept, since choosing a new one needs separate validation data.
-
-        X : features in the order of self.features, e.g. from
-            features_from_bboxes() (drop rows where valid is False)
-        y : 1 / 0, or pose strings compared against positive_label
-        w : optional sample weights
-
-        Returns the balanced accuracy on (X, y) at the stored threshold.
-        """
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y)
-        if y.dtype.kind in 'OUS':
-            y = (y == self.positive_label).astype(int)
-
-        model = clone(self.classifier_py)
-        final = model.steps[-1][1] if isinstance(model, Pipeline) else model
-        if w is not None and not has_fit_parameter(final, "sample_weight"):
-            raise ValueError(f"{type(final).__name__} does not support sample weights; call fit() without w")
-
-        if w is None:
-            model.fit(X, y)
-        elif isinstance(model, Pipeline):
-            model.fit(X, y, **{f"{model.steps[-1][0]}__sample_weight": w})
-        else:
-            model.fit(X, y, sample_weight=w)
-
-        # Keep the saved dictionary in step with the refitted model
-        self.classifier_py = model
-        self.estimator = estimator_to_dict(model)
-        self.versions = _versions()
-
-        prob = model.predict_proba(X)[:, self._positive_index()]
-        return balanced_accuracy_score(y, (prob >= self.threshold).astype(int))
