@@ -9,6 +9,7 @@ import hsdetect.annot
 import hsdetect.cv
 import hsdetect.ipc
 
+import ast
 import importlib
 import inspect
 import pkgutil
@@ -32,9 +33,23 @@ def _iter_module_infos():
         yield module_name, spec.origin
 
 
-def _is_engine_module(module_name):
-    module = importlib.import_module(module_name)
-    return getattr(module, "IS_ENGINE_MODULE", False)
+def _is_engine_module(module_path):
+    """
+    True if the module sets IS_ENGINE_MODULE = True at top level.
+
+    Checked in the source instead of importing the module, so that modules
+    which are not engine modules (e.g. training code importing hsod) are
+    never imported when looking for engines.
+    """
+    with open(module_path, 'rb') as io:
+        tree = ast.parse(io.read(), filename=module_path)
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == "IS_ENGINE_MODULE"
+               for t in node.targets):
+            return isinstance(node.value, ast.Constant) and node.value.value is True
+    return False
 
 
 def _find_build_function(module):
@@ -55,7 +70,7 @@ def _build_registry():
     registry = {}
 
     for module_name, module_path in _iter_module_infos():
-        if not _is_engine_module(module_name):
+        if not _is_engine_module(module_path):
             continue
 
         module = importlib.import_module(module_name)
