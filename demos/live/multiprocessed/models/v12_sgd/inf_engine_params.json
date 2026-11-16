@@ -1,5 +1,4 @@
 {
-  "engine_names": ["PreprocEngAWA", "BackgroundSub", "MedianSub", "ZeroCorners", "DLEngine", "YOLO_EnDecode_Engine"],
   "engines": [
     {
       "K": 2,

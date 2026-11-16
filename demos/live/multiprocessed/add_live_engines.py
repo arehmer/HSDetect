@@ -63,8 +63,6 @@ for engine in engine_order:
 
 # %% Write pipeline back to parameter dict
 engine_params_dict['engines'] = engine_pipeline_ordered
-if 'engine_names' in engine_params_dict:
-    engine_params_dict['engine_names'] = [e['name'] for e in engine_pipeline_ordered]
 
 # %% Build engine to make sure it will build live as well
 try:

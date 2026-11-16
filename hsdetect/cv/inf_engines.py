@@ -488,6 +488,10 @@ class InferenceEngine:
             # check if it's a property
             if isinstance(attr, property):
                 
+                # Derived from the engines when built, not a parameter
+                if attr_name == 'engine_names':
+                    continue
+                
                 # Retrieve the value of the property attr
                 attr_val = getattr(self, attr_name)
                 
