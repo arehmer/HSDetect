@@ -53,7 +53,9 @@ engine_pipeline = engine_params_dict['engines']
 engine_pipeline.insert(4,shrink_engine.save())
 
 # %% Also change dl_model path
-engine_pipeline[5]['dl_model'] = (dir_out / 'YOLOv2Tiny8X.keras').as_posix()
+# Only the file name is stored; InferenceProcess resolves it relative
+# to the directory of the .dict file.
+engine_pipeline[5]['dl_model'] = 'YOLOv2Tiny8X.keras'
 
 # %% Add the pose estimator if required
 if ADD_POSTURE_ENGINE:

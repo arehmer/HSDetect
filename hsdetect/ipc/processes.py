@@ -1,4 +1,5 @@
 import time
+import traceback
 from pathlib import Path
 import warnings
 import pickle as pkl
@@ -157,11 +158,21 @@ class InferenceProcess(RWProcess_R1):
                 
                 with open(file,'rb') as io:
                     inf_engine_params = pkl.load(io)
-                    try:
-                        self.inference_engine = build_engine(**inf_engine_params)
-                        print(f'Built inference engine with engines: {self.inference_engine.engine_names}.')
-                    except:
-                        pass
+                    
+                # The model is expected to lie next to the .dict, so only its file name is used.
+                for engine_params in inf_engine_params.get('engines', []):
+                    dl_model = engine_params.get('dl_model')
+                    if engine_params.get('name') == 'DLEngine' and \
+                        isinstance(dl_model, (str, Path)):
+                        dl_model = self.inference_engine_dir / Path(dl_model).name
+                        engine_params['dl_model'] = dl_model.as_posix()
+                
+                try:
+                    self.inference_engine = build_engine(**inf_engine_params)
+                    print(f'Built inference engine with engines: {self.inference_engine.engine_names}.')
+                except Exception:
+                    print(f'[{self.name}] Failed to build inference engine from {file}:')
+                    traceback.print_exc()
                 
         if self.inference_engine is None:
             raise RuntimeError('Was not able to build inference engine from ' + \
