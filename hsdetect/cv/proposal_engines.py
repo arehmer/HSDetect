@@ -6,7 +6,6 @@ Created on Fri May 24 10:11:20 2024
 """
 
 import numpy as np
-from sklearn.linear_model import LinearRegression
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -553,6 +552,7 @@ class ProposalEngineBBoxRegression(ProposalEngine):
         Y = bboxes[list(self.cv_proposal_engine.bbox_reg_out)]
         
         # Estimate model coefficients using sklearn
+        from sklearn.linear_model import LinearRegression   # imported here: sklearn only when used
         bbox_reg_model = LinearRegression()
         
         try:
@@ -1275,6 +1275,7 @@ class Watershed_32x32_L1k9(PropGenWatershed_v1_CV):
         Y = bboxes[list(self.cv_proposal_engine.bbox_reg_out)]
         
         # Estimate model coefficients using sklearn
+        from sklearn.linear_model import LinearRegression   # imported here: sklearn only when used
         bbox_reg_model = LinearRegression()
         bbox_reg_model.fit(X,Y)
         bbox_reg_model.score(X,Y)

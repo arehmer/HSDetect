@@ -5,8 +5,8 @@ Reading and writing inference engine parameter files.
 The parameters of an inference engine (the dict returned by
 InferenceEngine.save() and passed to build_engine()) are stored as JSON.
 
-File paths in the parameters (the Keras model of a DLEngine, the classifier
-file of a BoxPoseClassifier, the checkpoint of a PostureNetEngine) are stored relative to the parameter file, so a
+File paths in the parameters (the ONNX model of a DLEngine, the classifier
+file of a BoxPoseClassifier) are stored relative to the parameter file, so a
 model directory can be moved or copied to another machine as a whole.
 Numpy arrays are stored together with their dtype.
 """
@@ -20,7 +20,7 @@ import numpy as np
 
 # Parameters holding a file path. In a JSON file they are stored relative to
 # the directory of the file.
-PATH_KEYS = ('dl_model', 'model_file', 'model_path')
+PATH_KEYS = ('dl_model', 'model_file')
 
 # Numpy arrays are stored with their dtype, as {"ndarray": [...], "dtype": ...},
 # so they are read back unchanged.

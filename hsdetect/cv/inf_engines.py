@@ -2,7 +2,7 @@
 inference.py
 
 Constructs the missing inference-side pipeline: background subtraction ->
-YOLOv2Tiny -> decode -> background update, wired together so the SAME
+network (ONNX) -> decode -> background update, wired together so the SAME
 per-frame step works for:
 
   1. Live/streaming data: call .step(frame) once per incoming raw frame.
@@ -26,7 +26,6 @@ detections. See the note at the bottom of the accompanying explanation
 for how that would build on top of this.
 """
 
-from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -45,19 +44,9 @@ except:
     
 from hsdetect import build_engine, Engine
 
-# from .background import BackgroundEngine
-from hsdetect.dl.decode import Detection
-from hsdetect.dl.models import YOLOv2Tiny
-
 logger = logging.getLogger(__name__)
 
 IS_ENGINE_MODULE = True
-
-@dataclass
-class FrameResult:
-    index: int
-    detections: List[Detection]
-    background_established: bool
 
 def build_inference_engine(**kwargs):
     name = kwargs.pop('name')
@@ -694,8 +683,7 @@ class InferenceEngine:
         if dl_engine is None:
             return
 
-        model_shape = getattr(getattr(dl_engine,'dl_model',None),
-                              'input_shape',None)
+        model_shape = getattr(dl_engine,'input_shape',None)
 
         if model_shape is None:
             return

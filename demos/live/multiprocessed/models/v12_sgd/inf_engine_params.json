@@ -29,19 +29,11 @@
     },
     {
       "SensorType": 2,
-      "dl_model": "YOLOv2Tiny8X.keras",
+      "dl_model": "YOLOv2Tiny8X.onnx",
       "name": "DLEngine"
     },
     {
       "SensorType": 2,
-      "yolo_anchors": {
-        "ndarray": [
-          [14.0, 13.0],
-          [18.0, 21.0],
-          [25.0, 18.0]
-        ],
-        "dtype": "<f8"
-      },
       "yolo_grid_size": [15, 20],
       "yolo_n_classes": 3,
       "name": "YOLO_EnDecode_Engine"

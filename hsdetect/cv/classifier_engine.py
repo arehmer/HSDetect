@@ -5,9 +5,6 @@ Created on Mon Jan 15 10:36:43 2024
 @author: rehmer
 """
 
-from sklearn.svm import LinearSVC, SVC
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.utils.validation import _is_fitted
 
 import typing
 import pickle as pkl
@@ -166,6 +163,7 @@ class ClassEngineLinSVM_CV(ClassifierEngine):
         
         # Check if the python svm is fitted, if so, initialize the Cpp 
         # implementation using these parameters
+        from sklearn.utils.validation import _is_fitted   # imported here: sklearn only when used
         if _is_fitted(self.svm_py) == True:
             self.initialize_cpp_instance()
             
@@ -271,6 +269,7 @@ class ClassEngineLinSVM_CV(ClassifierEngine):
 
     def initialize_py_instance(self,**kwargs):
         
+        from sklearn.svm import LinearSVC   # imported here: sklearn only when used
         new_svm_py = LinearSVC(dual=self.dual,
                                max_iter = self.max_iter,
                                class_weight = self.class_weight,
@@ -351,6 +350,7 @@ class ClassEngineLinSVM_CV(ClassifierEngine):
             bboxes_cpp = bboxes
         
         # If already fitted, use the Cpp implementation to predict label and scores
+        from sklearn.utils.validation import _is_fitted   # imported here: sklearn only when used
         if _is_fitted(self.svm_py) == True:
             bboxes_pred_cpp  = self.cv_classifier_engine.process(X,bboxes_cpp)
             bboxes_pred = cv2_to_pd_DataFrame(bboxes_pred_cpp)
@@ -383,6 +383,7 @@ class RandomForest(ClassifierEngine):
         
     def initialize_py_instance(self,**kwargs):
         
+        from sklearn.ensemble import RandomForestClassifier   # imported here: sklearn only when used
         new_svm_py = RandomForestClassifier(max_depth = 2)
         
         # if len(self.coef) != 0:
@@ -506,6 +507,7 @@ class ClassEngineSVC(ClassEngineLinSVM_CV):
     
     def initialize_py_instance(self,**kwargs):
         
+        from sklearn.svm import SVC   # imported here: sklearn only when used
         new_svm_py = SVC()
         
         # if len(self.coef) != 0:

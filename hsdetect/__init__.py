@@ -11,7 +11,6 @@ import hsdetect.ipc
 
 import ast
 import importlib
-import inspect
 import pkgutil
 from functools import lru_cache
 
@@ -33,62 +32,57 @@ def _iter_module_infos():
         yield module_name, spec.origin
 
 
-def _is_engine_module(module_path):
+def _engine_module_info(module_path):
     """
-    True if the module sets IS_ENGINE_MODULE = True at top level.
+    For an engine module (one that sets IS_ENGINE_MODULE = True at top
+    level): (name of its build_* function, names of its classes). None for
+    any other module.
 
-    Checked in the source instead of importing the module, so that modules
-    which are not engine modules (e.g. training code importing hsod) are
-    never imported when looking for engines.
+    Read from the source instead of importing the module, so that looking
+    for engines imports nothing. A module is only imported once one of its
+    engines is built (see build_engine()), so e.g. sklearn is only loaded
+    when one of the classical classifiers is built.
     """
     with open(module_path, 'rb') as io:
         tree = ast.parse(io.read(), filename=module_path)
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        if any(isinstance(t, ast.Name) and t.id == "IS_ENGINE_MODULE"
-               for t in node.targets):
-            return isinstance(node.value, ast.Constant) and node.value.value is True
-    return False
 
+    is_engine_module = any(
+        isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "IS_ENGINE_MODULE"
+                for t in node.targets)
+        and isinstance(node.value, ast.Constant) and node.value.value is True
+        for node in tree.body)
+    if not is_engine_module:
+        return None
 
-def _find_build_function(module):
-    candidates = [
-        obj for name, obj in inspect.getmembers(module, inspect.isfunction)
-        if name.startswith("build_") and obj.__module__ == module.__name__
-    ]
-    if len(candidates) != 1:
-        raise RuntimeError(
-            f"Expected exactly one build_* function in {module.__name__}, "
-            f"found {[c.__name__ for c in candidates]}"
-        )
-    return candidates[0]
+    build_fns = [node.name for node in tree.body
+                 if isinstance(node, ast.FunctionDef) and node.name.startswith("build_")]
+    if len(build_fns) != 1:
+        raise RuntimeError(f"Expected exactly one build_* function in "
+                           f"{module_path}, found {build_fns}")
+
+    classes = [node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    return build_fns[0], classes
 
 
 @lru_cache(maxsize=None)
 def _build_registry():
+    """{engine class name: (module name, name of its build_* function)}"""
     registry = {}
 
     for module_name, module_path in _iter_module_infos():
-        if not _is_engine_module(module_path):
+        info = _engine_module_info(module_path)
+        if info is None:
             continue
+        build_fn, classes = info
 
-        module = importlib.import_module(module_name)
-
-        if not hasattr(module, "get_classes"):
-            raise RuntimeError(
-                f"{module_name} has IS_ENGINE_MODULE set but no get_classes()"
-            )
-
-        build_fn = _find_build_function(module)
-
-        for class_name in module.get_classes():
-            if class_name in registry and registry[class_name] is not build_fn:
+        for class_name in classes:
+            if class_name in registry and registry[class_name] != (module_name, build_fn):
                 raise RuntimeError(
                     f"Duplicate class name '{class_name}' found in "
                     f"multiple engine modules"
                 )
-            registry[class_name] = build_fn
+            registry[class_name] = (module_name, build_fn)
 
     return registry
 
@@ -105,9 +99,10 @@ def build_engine(**kwargs):
     if name is None:
         raise ValueError("build_engine requires a 'name' kwarg")
 
-    registry = _build_registry()
-    build_fn = registry.get(name)
-    if build_fn is None:
+    entry = _build_registry().get(name)
+    if entry is None:
         raise Exception(f"Engine '{name}' not known in any module!")
 
-    return build_fn(**kwargs)
+    module_name, build_fn = entry
+    module = importlib.import_module(module_name)
+    return getattr(module, build_fn)(**kwargs)

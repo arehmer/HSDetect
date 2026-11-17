@@ -1,6 +1,17 @@
+"""
+DLEngine: runs the detection network, exported as ONNX, with ONNX Runtime.
+
+The ONNX model (exported by AlexYoloPureSec, yolotiny.training.save_detector)
+contains the box decoding. For one frame it returns
+
+    (1, grid_h * grid_w * num_anchors, 5 + C)
+
+rows ordered by (cell_y, cell_x, anchor): xtl, ytl, xbr, ybr, conf,
+class_0 .. class_{C-1}, in pixels and with sigmoid applied. Thresholding and
+NMS follow in YOLO_EnDecode_Engine.
+"""
 from pathlib import Path
-import tensorflow as tf
-import pandas as pd
+
 import numpy as np
 
 from hspy.tparray import TPArray
@@ -17,7 +28,7 @@ def build_dl_engine(**kwargs):
         raise TypeError(f'Unknown Inference Engine {name}!')
 
 
-import ast       
+import ast
 def get_classes():
     with open(__file__, 'r') as f:
         tree = ast.parse(f.read(), filename=__file__)
@@ -25,94 +36,67 @@ def get_classes():
 
 
 class DLEngine(Engine):
-    
+
     name = 'DLEngine'
-    
+
     def __init__(self,
              SensorType:int,
              **attr_dict:dict):
-        
-        self.SensorType = SensorType  
+
+        self.SensorType = SensorType
         self.htpa = TPArray(SensorType = SensorType)
         self.dl_model = attr_dict.pop('dl_model',None)
-        
+
     @property
     def SensorType(self):
         return self._SensorType
-    
+
     @SensorType.setter
     def SensorType(self,SensorType:int):
         self._SensorType = SensorType
-        
+
     @property
     def dl_model(self):
+        """Path of the ONNX model (str), None if no model is loaded."""
         return self._dl_model
-    
+
     @dl_model.setter
     def dl_model(self,dl_model):
+        self._session = None
+        self._dl_model = None
         if dl_model is None:
-            self._dl_model = None
-        elif isinstance(dl_model, Path) or isinstance(dl_model, str):
-            print(dl_model)
-            self._dl_model = tf.keras.models.load_model(dl_model)
-        elif isinstance(dl_model,tf.keras.Model):
-            self._dl_model = dl_model
-        else:
-            raise Exception(f'Model {dl_model} not recognized.')
+            return
+        if not isinstance(dl_model, (str, Path)) or Path(dl_model).suffix != '.onnx':
+            raise ValueError(f'dl_model must be the path of an .onnx model, got {dl_model!r}.')
+
+        import onnxruntime as ort
+        self._session = ort.InferenceSession(str(dl_model),
+                                             providers=['CPUExecutionProvider'])
+        self._input_name = self._session.get_inputs()[0].name
+        self._dl_model = Path(dl_model).as_posix()
+
+    @property
+    def input_shape(self) -> tuple:
+        """Input shape of the model without the batch axis, e.g. (120, 160, 2)."""
+        if self._session is None:
+            return None
+        return tuple(self._session.get_inputs()[0].shape[1:])
 
     def __call__(self,data):
-        
+
         frame = data['frame']
-        idx = data['idx']
-        
+
         if frame is None:
             return None
         else:
             # make_net_input() casts to float32 and promotes a 2-D frame to
-            # (H,W,1). It is the same function
-            # video_dataset.build_frame_targets() uses, so the array fed to the
-            # model here is formed exactly as the training data was. A second
-            # channel, if any, arrives already stacked and normalized from
-            # BackgroundSub. Note the batch axis is added by indexing, NOT by the
-            # previous reshape((1,) + frame.shape + (1,)): that hardcoded a
-            # trailing channel axis of 1 and produced a 5-D tensor as soon as
-            # the frame carried two channels.
+            # (H,W,1), as in training. A second channel, if any, arrives
+            # already stacked and normalized from BackgroundSub. The batch
+            # axis is added by indexing.
             frame = make_net_input(frame)[np.newaxis, ...]
-            return self.dl_model(frame)
-
+            return self._session.run(None, {self._input_name: frame})[0]
 
     def save(self):
-        """
-        Overrides standard save method, which only stores attributes, but 
-        is not capable of storing objects which have a save() method of 
-        their own.
-
-        Returns
-        -------
-        None.
-
-        """
-        
-        attr_dict = {}
-        
-        for attr_name in dir(self):
-            # get the attribute *on the class*, not the instance
-            attr = getattr(self.__class__, attr_name, None)
-        
-            # check if it's a property
-            if isinstance(attr, property):
-                
-                # Retrieve the value of the property attr
-                attr_val = getattr(self, attr_name)
-                
-                # If the property has a save() method, save the return value of
-                # that method
-                if hasattr(attr_val, "save") and callable(attr_val.save):
-                    attr_dict[attr_name] = attr_val.save()
-                else:
-                    attr_dict[attr_name] = attr_val
-                
-        # Append name
-        attr_dict['name'] = self.name
-                
-        return attr_dict
+        return {'name': self.name,
+                'SensorType': self.SensorType,
+                'dl_model': self.dl_model}

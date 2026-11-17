@@ -4,6 +4,5 @@
 @author: Rehmer
 """
 
-from .layers import *
-from .models import *
-from .background import *
+# Nothing is imported here, so that importing a module of this package
+# (e.g. hsdetect.dl.decode) loads nothing else.

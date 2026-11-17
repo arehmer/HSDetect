@@ -36,9 +36,10 @@ engine_params_dict = load_engine_params(file_in)
 
 engine_pipeline = engine_params_dict['engines']
 # %% Change dl_model path
-# The Keras model is expected in the output directory. save_engine_params()
+# The ONNX model is expected in the output directory. save_engine_params()
 # stores the path relative to the parameter file, i.e. as file name only.
-InferenceEngine.get_engine_params(engine_params_dict, 'DLEngine')['dl_model'] =     (dir_out / 'YOLOv2Tiny8X.keras').as_posix()
+dl_engine_params = InferenceEngine.get_engine_params(engine_params_dict, 'DLEngine')
+dl_engine_params['dl_model'] = (dir_out / 'YOLOv2Tiny8X.onnx').as_posix()
 
 # %% Add the pose estimator if required
 if ADD_POSTURE_ENGINE:
