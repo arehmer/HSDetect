@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "HSDetect"
+version = "0.0.1"
+description = "Detection engines and device runtime for Heimann Sensor thermopile arrays."
+requires-python = ">=3.10"
+authors = [
+    { name = "Alexander Rehmer", email = "rehmer@heimannsensor.com" },
+]
+
+# Runtime dependencies, i.e. what a device running an exported engine chain
+# needs. Keeping this list short is a goal in itself: TensorFlow was removed
+# when inference moved to ONNX, and sklearn is imported lazily (see
+# classifier_engine.py) so that it is only needed when a classical classifier
+# is actually built.
+#
+# matplotlib is listed because six modules import it at module level today
+# (annot.py, detectors.py, misc.py, proposal_engines.py, trackers.py,
+# background.py). It is a plotting dependency, not a runtime one, and belongs
+# in an extra once the plotting helpers are split out.
+dependencies = [
+    "numpy>=2",
+    "pandas",
+    "onnxruntime",
+    "tqdm",
+    "matplotlib",
+]
+
+# NOT declared here, because neither is on PyPI; both must be installed by hand:
+#
+#   HSPy    -- provides `hspy` and `hspytools`, imported at module level by
+#              almost every module in this package, dl_engines.py and decode.py
+#              included. Install from the sibling checkout:
+#                  pip install -e ../HSPy
+#              Note that HSPy itself depends on `opencv-python`, which will
+#              overwrite the custom OpenCV build described below. Install the
+#              custom build last, or drop opencv-python from HSPy.
+#
+#   OpenCV  -- the custom HSOpenCV build (distribution name `opencv`, version
+#              4.12.0) that provides the `cv2.htpa` module used by annot.py and
+#              classifier_engine.py. The PyPI `opencv-python` package does NOT
+#              provide cv2.htpa. The build must be compiled against NumPy 2.x;
+#              a build made against NumPy 1.x fails to import under the
+#              `numpy>=2` pinned above.
+#
+# A development environment that runs the test suite, without the custom
+# OpenCV and therefore without the engines that need cv2.htpa:
+#
+#     python -m venv .venv
+#     .venv/Scripts/python -m pip install -e .[dev]
+#     .venv/Scripts/python -m pip install -e ../HSPy --no-deps
+#     .venv/Scripts/python -m pip install scipy h5py openpyxl smbus2 #         scikit-learn mcap tables pyusb libusb-package opencv-python
+#
+# HSPy is installed with --no-deps and its dependencies listed explicitly so
+# that its `opencv-python` requirement does not silently replace a custom
+# OpenCV build in the environment. hspy/__init__.py imports its USB and I2C
+# driver stack eagerly, which is why pyusb and smbus2 are needed to import
+# `hspy.tparray` for a sensor geometry constant.
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+# Imported lazily by classifier_engine.py and sklearn_portable_classifiers.py.
+classic = [
+    "scikit-learn",
+]
+
+[tool.setuptools.packages.find]
+include = ["hsdetect*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
