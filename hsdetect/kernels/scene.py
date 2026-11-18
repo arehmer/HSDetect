@@ -1,23 +1,17 @@
 """
-netinput.py
+Scene level and the array the detector consumes.
 
-Single source of truth for the array the detector consumes. Deliberately
-numpy-only (no tensorflow, no hspy), so it can be imported from both ends of
-the pipeline:
+Single source of truth for the network input. Deliberately numpy-only (no
+tensorflow, no hspy), so it can be imported from both ends of the pipeline:
 
-  * TRAINING   -- video_dataset.build_frame_targets(), once per frame while
-                  the tf.data.Dataset is being built.
+  * TRAINING   -- HSDetectTrain's yolotiny.preprocess, once per frame while
+                  the training arrays are built.
   * INFERENCE  -- cv.preproc_engines (BackgroundSub stacks the channels,
                   MedianSub removes the scene level) and
                   dl_engines.DLEngine.__call__(), which forms the batch.
 
 Both paths MUST produce identical arrays, which is the only reason this lives
 in a module of its own rather than being inlined twice.
-
-It sits at the top level of the package, rather than next to its callers in
-hsdetect.dl, because hsdetect/dl/__init__.py star-imports the tensorflow-backed
-layer and model modules -- importing it from hsdetect.cv.preproc_engines would
-otherwise pull tensorflow into the preprocessing import chain.
 
 Two-channel input
 -----------------
@@ -221,3 +215,20 @@ def make_net_input(frame: np.ndarray) -> np.ndarray:
                          f'got shape {x.shape}.')
 
     return x
+
+
+def net_input(frame_bgsub: np.ndarray, frame_raw: np.ndarray,
+              mask: np.ndarray = None) -> np.ndarray:
+    """The whole channel-1 correction and stacking in one call.
+
+    (H, W, 2) float32 from the background-subtracted frame and the frame that
+    entered background subtraction: channel 1 has its own scene level
+    removed, estimated over `mask`.
+
+    The live chain does not use this, because BackgroundSub stacks and
+    MedianSub corrects at different points of the engine chain; it is for a
+    caller holding both frames at once, which is the case while preparing
+    training data.
+    """
+    raw = subtract_scene_level(frame_raw, estimate_scene_level(frame_raw, mask))
+    return np.stack([np.asarray(frame_bgsub, dtype=np.float32), raw], axis=-1)

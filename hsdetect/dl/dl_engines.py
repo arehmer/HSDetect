@@ -16,7 +16,7 @@ import numpy as np
 
 from hspy.tparray import TPArray
 from hsdetect import Engine
-from hsdetect.netinput import make_net_input
+from hsdetect.kernels import make_net_input
 
 IS_ENGINE_MODULE = True
 

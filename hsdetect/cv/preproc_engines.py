@@ -8,15 +8,19 @@ Created on Thu Jan 26 09:54:07 2023
 # from .gradient import  ConvolutionFilter
 
 import numpy as np
-import cv2
 import copy 
 import pandas as pd 
 import warnings
 
 from hsdetect.annot.annot import AnnotatedVideo, AnnotatedFrame
-from hsdetect.netinput import (stack_channels,
+from hsdetect.kernels import (detection_mask,
                               estimate_scene_level,
-                              subtract_scene_level)
+                              stack_channels,
+                              subtract_background,
+                              subtract_scene_level,
+                              update_background,
+                              zero_corners,
+                              AWAFilter)
 from hspy.tparray import TPArray
 
 from hsdetect import Engine
@@ -129,9 +133,7 @@ class PreprocEngAWA(PreprocEngine):
         
         
 
-        self.cv_preproc_engine = \
-            cv2.htpa.PreprocEngAWA(self.SensorType, self.K, self.S, 
-                                   self.a, self.eps)
+        self._awa = self._build_filter()
             
     @property
     def K(self):
@@ -162,6 +164,38 @@ class PreprocEngAWA(PreprocEngine):
         self._eps = eps
 
     
+    def _build_filter(self) -> AWAFilter:
+        """The numpy AWA filter this engine runs, from the current settings."""
+        return AWAFilter(self._tparray.height,
+                         self._tparray.width,
+                         self.K,
+                         self.S,
+                         self.a,
+                         self.eps)
+
+    def __getattr__(self, name):
+        """Build the C++ filter on first access, for the classic C++ detector.
+
+        cv2.htpa.OneScaleDetector is assembled from the C++ sub-objects of
+        four engines (see cv.detectors.OneScaleDetector) and reaches in here
+        for `cv_preproc_engine`. Building it lazily keeps this engine -- which
+        runs the numpy filter in hsdetect.kernels -- constructible and
+        runnable without cv2.htpa, while that detector keeps working wherever
+        the custom OpenCV build is installed.
+
+        Deliberately not a property: Engine.save() serializes a chain by
+        walking properties, and a C++ object cannot be serialized.
+        """
+        if name == 'cv_preproc_engine':
+            import cv2
+            engine = cv2.htpa.PreprocEngAWA(self.SensorType, self.K, self.S,
+                                            self.a, self.eps)
+            self.__dict__[name] = engine
+            return engine
+
+        raise AttributeError(f'{type(self).__name__!r} object has no '
+                             f'attribute {name!r}')
+
     def _process_frame(self,
                        frame:np.ndarray,
                        idx:int,
@@ -169,8 +203,7 @@ class PreprocEngAWA(PreprocEngine):
                 
         frame = frame.astype(np.uint16).reshape(self._tparray._npsize)
         
-        idx_filt, img_proc = self.cv_preproc_engine.process(frame,
-                                                            idx)
+        idx_filt, img_proc = self._awa.filter(frame, idx)
         
         # # Create an AnnotatedFrame
         # annot_frame =  AnnotatedFrame(index = idx_filt,
@@ -237,9 +270,11 @@ class PreprocEngAWA(PreprocEngine):
         
         """
                 
-        self.cv_preproc_engine = \
-            cv2.htpa.PreprocEngAWA(self.SensorType, self.K, self.S, 
-                                   self.a, self.eps)
+        self._awa = self._build_filter()
+
+        # Drop a C++ instance built by __getattr__ as well: its
+        # internal frame buffer must not survive a reset either.
+        self.__dict__.pop('cv_preproc_engine', None)
  
 class BackgroundSub(PreprocEngine):
     """Maintains and updates a running background image, and performs
@@ -457,44 +492,24 @@ class BackgroundSub(PreprocEngine):
         if current_frame.dtype != np.uint16:
             current_frame = current_frame.astype(np.uint16)
 
-        h, w = self.htpa.height, self.htpa.width
-        # boxes = self._normalize_detections(detections)
+        # The arithmetic lives in hsdetect.kernels.background, shared with
+        # HSDetectTrain; the n_init / _bg_valid bookkeeping below is policy
+        # and stays here, in properties that save() can serialize.
+        first_call = (not self._bg_valid) and self._n_init == 0
 
-        # ---- 2a. Build the detection mask (255 = overlaps a detection) ----
-        det_mask = np.zeros((h, w), dtype=np.uint8)
-        for idx, detection in detections.iterrows():
-            xtl, ytl, xbr, ybr = detection[['xtl','ytl','xbr','ybr']]
-            # Clipping
-            xtl_c = max(0, int(xtl) - self.box_pad)
-            ytl_c = max(0, int(ytl) - self.box_pad)
-            xbr_c = min(w, int(xbr) + self.box_pad)
-            ybr_c = min(h, int(ybr) + self.box_pad)
-            det_mask[ytl_c:ybr_c, xtl_c:xbr_c] = 255
+        self.bg, self.bg_mask = update_background(
+            None if first_call else self.bg,
+            self.bg_mask,
+            current_frame,
+            detections,
+            decay = self.decay,
+            thresh_update = self.thresh_update,
+            box_pad = self.box_pad)
 
         # ---- Exception: first call ever -- no valid background yet ----
-        if not self._bg_valid and self._n_init == 0:
-            self.bg = current_frame.copy()
-            self.bg_mask = np.bitwise_not(det_mask)
+        if first_call:
             self._n_init = 1
             return
-
-        # ---- 2b. Exclude pixels whose diff from the current bg exceeds
-        #      thresh_update, in addition to detected pixels ----
-        abs_diff = np.abs(current_frame.astype(np.float32) - self.bg)
-        diff_mask = np.where(abs_diff > self.thresh_update, np.uint8(255), np.uint8(0))
-        det_mask = np.bitwise_or(det_mask, diff_mask)
-
-        # ---- 3. Accumulate which pixels have ever been validly observed ----
-        self.bg_mask = np.bitwise_or(self.bg_mask, np.bitwise_not(det_mask))
-
-        # ---- 4. Background candidate: excluded pixels keep old bg,
-        #      valid (det_mask == 0) pixels take the current frame ----
-        excluded = det_mask.astype(bool)
-        bg_cand = np.where(excluded, self.bg, current_frame.astype(np.float32))
-
-        # ---- EMA update, with saturate_cast-style round + clip to uint16 ----
-        bg_float = self.decay * self.bg + (1.0 - self.decay) * bg_cand
-        self.bg = np.clip(bg_float, 0, 65535)
 
         # ---- n_init / bg_valid bookkeeping (exact port, two sequential ifs) ----
         if not self._bg_valid and self._n_init < self.N_init - 1:
@@ -526,10 +541,7 @@ class BackgroundSub(PreprocEngine):
             return None
         
         # Subtract
-        frame_bgsub = current_frame.astype(np.float32) - self.bg
-        
-        # Return
-        return abs(frame_bgsub).astype(np.uint16)
+        return subtract_background(current_frame, self.bg)
     
     
     def reset(self):
@@ -567,7 +579,7 @@ class BackgroundSub(PreprocEngine):
         # Channel 1 is still in absolute sensor units at this point: removing
         # its scene level is the MedianSub engine's job, and MedianSub has to
         # come next in the chain -- before anything resamples the frame. See
-        # hsdetect.netinput for why.
+        # hsdetect.kernels.scene for why.
         #
         # Gated by stack_raw (default False) so that a pipeline built for a
         # single-channel model -- including every engine dict saved before
@@ -720,7 +732,7 @@ class MedianSub(PreprocEngine):
 
     The level is estimated per frame rather than taken as a fixed constant so
     that a model trained at one ambient temperature still sees the same
-    channel 1 at another. See hsdetect.netinput for the measurements behind
+    channel 1 at another. See hsdetect.kernels.scene for the measurements behind
     all of this.
 
     This is an engine, rather than part of BackgroundSub or of the dataset
@@ -880,21 +892,7 @@ class ZeroCorners(PreprocEngine):
             
             return return_dict
         
-        if frame.ndim == 2:
-            # Unchanged behaviour for a single-channel frame: cast (which also
-            # makes the defensive copy the in-place masking below relies on).
-            frame = frame.astype(np.uint16)
-        else:
-            # From BackgroundSub on, the frame may carry a second, already
-            # normalized channel (see hsdetect.netinput) and is then float32.
-            # Casting that to uint16 would truncate it, so only copy.
-            frame = frame.copy()
-        
-        # Obtain detection mask [0,1] and convert to boolean
-        detection_mask = self._tparray._detection_mask.astype(bool)
-        
-        # Set corners (detection_mask = 0) to zero
-        frame[~detection_mask] = 0
+        frame = zero_corners(frame, self._tparray._detection_mask)
         
         # Shrink and center (commented out, trying to fix through augmentation)
         # frame = shrink_and_center(frame,0.64)
@@ -972,6 +970,11 @@ def shrink_and_center(img: np.ndarray, factor: float) -> np.ndarray:
     new_w, new_h = max(1, int(round(w * factor))), max(1, int(round(h * factor)))
 
     # INTER_AREA is the best interpolation for downscaling
+    # Imported here, not at module level: this is the only use of OpenCV
+    # left in the preprocessing chain, and the engines themselves run on
+    # hsdetect.kernels, which is numpy only.
+    import cv2
+
     small = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
     # Zero-initialized canvas with the original shape and dtype

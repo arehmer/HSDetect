@@ -193,7 +193,7 @@ class AnnotatedFrame:
                     'detector_idx':'int32','image_id':'int32'}
     
     # Optional second image, carried alongside self.image as an additional
-    # input channel for the detector (see hsdetect.dl.netinput). Declared at
+    # input channel for the detector (see hsdetect.kernels.scene). Declared at
     # class level on purpose: AnnotatedFrames pickled before this attribute
     # existed have no 'image2' in their __dict__, and unpickling does not call
     # __init__ -- so the class attribute is what makes frame.image2 resolve to
