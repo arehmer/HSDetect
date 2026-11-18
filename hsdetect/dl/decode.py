@@ -15,7 +15,7 @@ import pandas as pd
 
 from hspy.tparray import TPArray
 
-from hsdetect import Engine
+from hsdetect import Engine, Payload
 
 IS_ENGINE_MODULE = True
 
@@ -68,6 +68,8 @@ class YOLO_EnDecode_Engine(Engine):
     """
 
     name = 'YOLO_EnDecode_Engine'
+    accepts = Payload.TENSOR
+    emits = Payload.BOXES
 
     def __init__(self,
                  SensorType : int,

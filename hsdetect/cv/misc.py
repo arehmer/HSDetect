@@ -5,6 +5,11 @@ Created on Thu Apr 27 16:07:59 2023
 @author: Rehmer
 """
 
+# cv2.htpa appears in the annotations below, which Python evaluates when
+# each def runs -- so without this the module failed to import wherever
+# the custom HSOpenCV build is absent.
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt

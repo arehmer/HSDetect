@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from hspy.tparray import TPArray
-from hsdetect import Engine
+from hsdetect import Engine, Payload
 from hsdetect.kernels import make_net_input
 
 IS_ENGINE_MODULE = True
@@ -38,6 +38,9 @@ def get_classes():
 class DLEngine(Engine):
 
     name = 'DLEngine'
+    # accepts is set from the model's channel count, see __init__.
+    accepts = (Payload.FRAME_MASKED, Payload.FRAME_STACKED)
+    emits = Payload.TENSOR
 
     def __init__(self,
              SensorType:int,
@@ -64,6 +67,11 @@ class DLEngine(Engine):
     def dl_model(self,dl_model):
         self._session = None
         self._dl_model = None
+
+        # Fall back to the class contract while no model is loaded, so that a
+        # previous model's channel count does not linger on this instance.
+        self.__dict__.pop('accepts', None)
+
         if dl_model is None:
             return
         if not isinstance(dl_model, (str, Path)) or Path(dl_model).suffix != '.onnx':
@@ -74,6 +82,14 @@ class DLEngine(Engine):
                                              providers=['CPUExecutionProvider'])
         self._input_name = self._session.get_inputs()[0].name
         self._dl_model = Path(dl_model).as_posix()
+
+        # The contract follows the model: a one-channel model takes the masked
+        # frame, a two-channel one the stacked frame. Declaring it here is what
+        # retires InferenceEngine._check_input_channels(), which had to name
+        # DLEngine and BackgroundSub literally to compare the two.
+        channels = self.input_shape[-1]
+        self.accepts = (Payload.FRAME_STACKED if channels == 2
+                        else Payload.FRAME_MASKED)
 
     @property
     def input_shape(self) -> tuple:

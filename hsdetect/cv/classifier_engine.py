@@ -5,6 +5,12 @@ Created on Mon Jan 15 10:36:43 2024
 @author: rehmer
 """
 
+# cv2.htpa appears in annotations below, which Python evaluates when the
+# class body runs -- so without this the whole module failed to import
+# wherever the custom HSOpenCV build is absent, even though only one
+# engine here actually calls into it.
+from __future__ import annotations
+
 
 import typing
 import pickle as pkl
@@ -17,7 +23,7 @@ import pandas as pd
 from .misc import pd_to_cv2_htpa_DataFrame, cv2_to_pd_DataFrame
 from .sklearn_portable_classifiers import model_from_dict, read_box_pose_classifier_json
 
-from hsdetect import Engine
+from hsdetect import Engine, Payload, SAME
 
 # Marker identifying this .py as a module containing engines
 IS_ENGINE_MODULE = True
@@ -43,42 +49,9 @@ def get_classes():
 
 class ClassifierEngine(Engine):
         
-    def save(self):
-        """
-        Overrides standard save method, which only stores attributes, but 
-        is not capable of storing objects which have a save() method of 
-        their own.
+    pass
 
-        Returns
-        -------
-        None.
 
-        """
-        
-        attr_dict = {}
-        
-        for attr_name in dir(self):
-            # get the attribute *on the class*, not the instance
-            attr = getattr(self.__class__, attr_name, None)
-        
-            # check if it's a property
-            if isinstance(attr, property):
-                
-                # Retrieve the value of the property attr
-                attr_val = getattr(self, attr_name)
-                
-                # If the property has a save() method, save the return value of
-                # that method
-                if hasattr(attr_val, "save") and callable(attr_val.save):
-                    attr_dict[attr_name] = attr_val.save()
-                else:
-                    attr_dict[attr_name] = attr_val
-                
-        # Append name
-        attr_dict['name'] = self.name
-                
-        return attr_dict
-    
     # def save(self):
     #     '''
     #     Returns all non-private an non-builtin attributes of this class
@@ -641,6 +614,8 @@ class BoxPoseClassifier(ClassifierEngine):
     """
 
     name = 'BoxPoseClassifier'
+    accepts = Payload.BOXES
+    emits = SAME
 
     def __init__(self, model_file):
 

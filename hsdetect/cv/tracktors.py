@@ -272,44 +272,6 @@ class Tracktor(Engine):
         return AnnotatedVideo(frames = annotated_frames)
         
       
-    def save(self):
-        """
-        Overrides standard save method, which only stores attributes, but 
-        is not capable of storing objects which have a save() method of 
-        their own.
-
-        Returns
-        -------
-        None.
-
-        """
-        
-        attr_dict = {}
-        
-        for attr_name in dir(self):
-            # get the attribute *on the class*, not the instance
-            attr = getattr(self.__class__, attr_name, None)
-        
-            # check if it's a property
-            if isinstance(attr, property):
-                
-                # Retrieve the value of the property attr
-                attr_val = getattr(self, attr_name)
-                
-                # If the property has a save() method, save the return value of
-                # that method
-                if hasattr(attr_val, "save") and callable(attr_val.save):
-                    attr_dict[attr_name] = attr_val.save()
-                else:
-                    attr_dict[attr_name] = attr_val
-                
-        # Append name
-        attr_dict['name'] = self.name
-                
-        return attr_dict        
-
-        
-
 class HSv00(Tracktor):
     
     name = 'HSv00'

@@ -39,7 +39,7 @@ try:
 except:
     from hsdetect.annot.annot import AnnotatedVideo, AnnotatedFrame
     
-from hsdetect import build_engine, Engine
+from hsdetect import build_engine, Engine, Payload, SAME
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +69,18 @@ def _engine_param_name(entry):
     return getattr(entry,'name',None)
 
 
-class InferenceEngine:
+class InferenceEngine(Engine):
     """Wraps a trained YOLOv2Tiny model and any number of pre- or post-
     processing engines into a frame-by-frame inference engine.
     """
     
     name = 'InferenceEngine'
+
+    # A chain is itself an engine: it takes the frame the sensor delivers
+    # and produces detections. `emits` is replaced per instance by
+    # _check_chain(), with whatever this particular chain ends on.
+    accepts = Payload.FRAME_RAW
+    emits = Payload.BOXES
     
     def __init__(self,**attr_dict:dict):
 
@@ -281,9 +287,16 @@ class InferenceEngine:
                 inf_res = self.step(frame,
                                     frame_idx)
                 
-                frame = inf_res['ZeroCorners']['frame']
-                idx = inf_res['PreprocEngAWA']['idx']
-                df_annot = inf_res['YOLO_EnDecode_Engine']
+                # The single-channel masked frame is the one worth storing
+                # next to the boxes; a chain without one (no ZeroCorners)
+                # falls back to the frame it was handed. Both are resolved by
+                # payload, so reordering the chain does not break this.
+                processed = (self._output_for(inf_res, Payload.FRAME_MASKED)
+                             or self._output_for(inf_res, Payload.FRAME_RAW))
+
+                frame = processed['frame']
+                idx = processed['idx']
+                df_annot = inf_res[self._boxes_source]
                 if len(df_annot)!=0:
                     df_annot = df_annot.loc[df_annot['conf'] >= conf_min]
                 
@@ -424,23 +437,38 @@ class InferenceEngine:
     def update_engines(self,
                        inference : dict,
                        gt = None):
-        
-        # The background subtraction index needs updating using either the
-        # detections inferred by the model or the ground truth annotations
-        if gt is not None:
-            update_annotations = gt
-        else:
-            update_annotations = inference['YOLO_EnDecode_Engine']
-            
-    
-        update_frame = inference['ZeroCorners']['frame']
-    
-        self._inference_pipeline['BackgroundSub'].update_bg(update_frame,
-                                                            update_annotations)
-        
-        
-        
-    
+        """Run the chain's backward edges after a forward pass.
+
+        Which engines have one, what they are handed and which method is
+        called is declared by the engines themselves, in Engine.feedback, and
+        validated by _check_chain(). This method used to name BackgroundSub,
+        ZeroCorners and YOLO_EnDecode_Engine literally, which made it correct
+        for exactly one chain order and silently wrong for any other.
+
+        `gt` replaces the chain's own detections when ground-truth boxes are
+        given, which is how the background is updated while preparing
+        training data.
+        """
+        for engine in self.engines:
+
+            spec = engine.feedback
+
+            if spec is None:
+                continue
+
+            args = []
+
+            if spec.frame:
+                payload = inference[self.IOmapping[engine.name]]
+                args.append(payload['frame'] if isinstance(payload, dict)
+                            else payload)
+
+            if spec.boxes:
+                args.append(gt if gt is not None
+                            else inference[self._boxes_source])
+
+            getattr(engine, spec.method)(*args)
+
     def _process_avideo(self,
                         avideo : AnnotatedVideo,
                         **kwargs) -> AnnotatedVideo:
@@ -505,80 +533,132 @@ class InferenceEngine:
             
             
     
+    def _output_for(self, inference : dict, payload : Payload):
+        """The output of the LAST engine of this chain that emitted `payload`,
+        or None if no engine does.
+
+        Asking what a result IS, rather than which engine produced it, is what
+        lets a caller keep working when the chain is reordered or an engine is
+        swapped for another that emits the same thing.
+        """
+        found = None
+
+        for engine in self.engines:
+            if self._engine_outputs.get(engine.name) is payload:
+                found = inference.get(engine.name)
+
+        return found
+
     def _build_inference_pipeline(self) -> None:
-        
+
         # The inference pipeline is just an ordered dict of engines
         self._inference_pipeline = {engine.name : engine for engine in self.engines}
-        
-        # Create an input/output mapping from the engines' names and their order
-        self._determineIOMapping()
 
-        # Fail here, rather than once a frame reaches the model, if the
-        # preprocessing chain and the model disagree on the channel count
-        self._check_input_channels()
-        
-        # Check which engines need updating after each step
-        # engines_requiring_update = []
-        # for engine_name, engine in self._inference_pipeline.items():
-        #     if hasattr(engine,'update_step'):
-        #         if callable(engine.update_step):
-        #             engines_requiring_update.append(engine_name)
-        
-        # self._engines_requiring_update = engines_requiring_update
-                    
-        
-    def _check_input_channels(self) -> None:
-        """Check that the preprocessing chain emits as many channels as the
-        model was built for.
+        # Work out what reaches each engine, and reject a chain that cannot
+        # work, before a single frame is pushed through it
+        self._check_chain()
 
-        Only BackgroundSub changes the channel count -- it stacks the frame
-        that entered the subtraction as a second channel when its stack_raw
-        flag is set -- so the number is known without running a frame through
-        the pipeline. Without this check a mismatch shows up only once a frame
-        reaches the model, as a per-frame exception raised inside the first
-        convolution and swallowed by whatever is driving the pipeline.
+    def _check_chain(self) -> None:
+        """Work out what reaches each engine, and reject a chain that cannot
+        work.
+
+        Everything here comes from the engines' own declarations
+        (Engine.accepts, Engine.emits, Engine.feedback), never from engine
+        names, so that a chain in a different order gets checked rather than
+        silently mis-wired. Two things are checked:
+
+        1. The forward flow. The chain is handed a FRAME_RAW; every engine is
+           asked whether it accepts what the engine before it emitted. This is
+           what catches a chain putting BackgroundSub before ZeroCorners:
+           BackgroundSub needs the dead corners zeroed, and says so in
+           `accepts`. Such a chain used to build happily and then feed
+           update_bg() a None frame on every step, so the background never
+           became valid, subtract() returned None forever, and the chain
+           produced no detections at all -- with no exception anywhere.
+
+        2. The backward edges. An engine declaring a Feedback needs the chain
+           to actually produce what that feedback is fed with, and needs the
+           method it names to exist.
+
+        An engine declaring neither `accepts` nor `emits` is untyped: it is
+        assumed to pass its payload on unchanged, so that an engine without a
+        contract can still sit in a chain.
         """
-        dl_engine = self._inference_pipeline.get('DLEngine')
+        names = [engine.name for engine in self.engines]
 
-        if dl_engine is None:
-            return
-
-        model_shape = getattr(dl_engine,'input_shape',None)
-
-        if model_shape is None:
-            return
-
-        bg_engine = self._inference_pipeline.get('BackgroundSub')
-
-        stack_raw = bool(getattr(bg_engine,'stack_raw',False))
-        frame_channels = 2 if stack_raw else 1
-        model_channels = model_shape[-1]
-
-        if frame_channels != model_channels:
+        duplicates = sorted({n for n in names if names.count(n) > 1})
+        if duplicates:
             raise ValueError(
-                'Channel mismatch between preprocessing and model: the '
-                f'chain emits {frame_channels} channel(s) '
-                f'(BackgroundSub.stack_raw = {stack_raw}), but the model was '
-                f'built for {model_channels} (input_shape '
-                f'{tuple(model_shape)}). Set stack_raw and the model '
-                'input_shape consistently.')
+                f'Chain contains more than one engine called {duplicates}. '
+                'Engines are addressed by name, so one would hide the other. '
+                f'Chain: {" -> ".join(names)}.')
 
-    def _determineIOMapping(self) -> None:
-        
-        # Dictionary that maps engine.name -> engine input 
-        IOmapping = {}
-        
-        # The first engine in the row always obtains the input frame
-        IOmapping[self.engines[0].name] = 'input'
-        
-        # The subsequent engines obtain the output from the previous frame 
-        # as input
-        for engine_curr, engine_prev in zip(self.engines[1::],self.engines[0:-1]):
-            IOmapping[engine_curr.name] = engine_prev.name
-        
-        # Store the mapping as attribute
-        self.IOmapping = IOmapping
-        
+        # Which engine's output each engine is handed. The chain is linear;
+        # 'input' is the frame step() was called with.
+        mapping = {names[0]: 'input'}
+        for curr, prev in zip(names[1:], names[:-1]):
+            mapping[curr] = prev
+        self.IOmapping = mapping
+
+        payload = self.accepts if isinstance(self.accepts, Payload) \
+            else Payload.FRAME_RAW
+        inputs, outputs = {}, {}
+
+        for position, engine in enumerate(self.engines):
+
+            accepted = engine.accepted_payloads()
+
+            if accepted and payload not in accepted:
+                source = ('the frame the chain is called with' if position == 0
+                          else "'" + names[position - 1] + "'")
+                raise ValueError(
+                    f"Engine '{engine.name}' at position {position} of this "
+                    f"chain accepts {', '.join(str(x) for x in accepted)}, "
+                    f'but {source} provides {payload}. '
+                    f'Chain: {" -> ".join(names)}.')
+
+            inputs[engine.name] = payload
+
+            emitted = payload if engine.emits in (None, SAME) else engine.emits
+            outputs[engine.name] = emitted
+            payload = emitted
+
+        self._engine_inputs = inputs
+        self._engine_outputs = outputs
+        self.emits = payload
+
+        # The engine the backward edges are fed from: the last one in the
+        # chain that produces boxes.
+        boxes_source = None
+        for engine in self.engines:
+            if outputs[engine.name] is Payload.BOXES:
+                boxes_source = engine.name
+        self._boxes_source = boxes_source
+
+        for engine in self.engines:
+
+            spec = engine.feedback
+
+            if spec is None:
+                continue
+
+            if not callable(getattr(engine, spec.method, None)):
+                raise ValueError(
+                    f"Engine '{engine.name}' declares the feedback method "
+                    f"'{spec.method}', which it does not have.")
+
+            if spec.frame and not inputs[engine.name].is_frame:
+                raise ValueError(
+                    f"Engine '{engine.name}' is fed back the payload it "
+                    f'receives, which has to be a frame, but it receives '
+                    f'{inputs[engine.name]}. Chain: {" -> ".join(names)}.')
+
+            if spec.boxes and boxes_source is None:
+                raise ValueError(
+                    f"Engine '{engine.name}' is updated with this chain's "
+                    f'detections, but no engine in the chain emits '
+                    f'{Payload.BOXES}. Chain: {" -> ".join(names)}.')
+
     def _check_engines(self):
         
         for engine in self.engines:

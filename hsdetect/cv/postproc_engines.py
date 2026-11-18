@@ -5,6 +5,12 @@ Created on Thu Jan 26 09:54:07 2023
 @author: Rehmer
 """
 
+# cv2.htpa appears in annotations below, which Python evaluates when the
+# class body runs -- so without this the whole module failed to import
+# wherever the custom HSOpenCV build is absent, even though only one
+# engine here actually calls into it.
+from __future__ import annotations
+
 # import pandas as pd
 # import pickle as pkl
 # from pathlib import Path
@@ -17,7 +23,7 @@ from hspy.tparray import TPArray
 # from hsdetect.cv.misc import pd_IoU 
 # from eval_measures import IoU
 
-from hsdetect import Engine
+from hsdetect import Engine, Payload, SAME
 
 # Marker identifying this .py as a module containing engines
 IS_ENGINE_MODULE = True
@@ -47,46 +53,11 @@ class PostprocEngine(Engine):
     def SensorType(self,SensorType:int):
         self._SensorType = SensorType
     
-    def save(self):
-        """
-        Overrides standard save method, which only stores attributes, but 
-        is not capable of storing objects which have a save() method of 
-        their own.
-
-        Returns
-        -------
-        None.
-
-        """
-        
-        attr_dict = {}
-        
-        for attr_name in dir(self):
-            # get the attribute *on the class*, not the instance
-            attr = getattr(self.__class__, attr_name, None)
-        
-            # check if it's a property
-            if isinstance(attr, property):
-                
-                # Retrieve the value of the property attr
-                attr_val = getattr(self, attr_name)
-                
-                # If the property has a save() method, save the return value of
-                # that method
-                if hasattr(attr_val, "save") and callable(attr_val.save):
-                    attr_dict[attr_name] = attr_val.save()
-                else:
-                    attr_dict[attr_name] = attr_val
-                
-        # Append name
-        attr_dict['name'] = self.name
-                
-        return attr_dict
-
-
 class PostprocEngineNMS(PostprocEngine):
     
     name = 'PostprocEngineNMS'
+    accepts = Payload.BOXES
+    emits = SAME
     
     def __init__(self,**attr_dict):
         
@@ -132,6 +103,8 @@ class BoxRescale(PostprocEngine):
     coordinates. Must be configured with the SAME factor as ShrinkCenter."""
 
     name = 'BoxRescale'
+    accepts = Payload.BOXES
+    emits = SAME
 
     def __init__(self, **attr_dict):
         self.SensorType = attr_dict['SensorType']          # property, for save()

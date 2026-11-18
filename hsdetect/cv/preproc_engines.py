@@ -23,7 +23,7 @@ from hsdetect.kernels import (detection_mask,
                               AWAFilter)
 from hspy.tparray import TPArray
 
-from hsdetect import Engine
+from hsdetect import Engine, Feedback, Payload, SAME
 
 IS_ENGINE_MODULE = True
 
@@ -63,42 +63,6 @@ class PreprocEngine(Engine):
     def SensorType(self,SensorType:int):
         self._SensorType = SensorType
         
-    def save(self):
-        """
-        Overrides standard save method, which only stores attributes, but 
-        is not capable of storing objects which have a save() method of 
-        their own.
-
-        Returns
-        -------
-        None.
-
-        """
-        
-        attr_dict = {}
-        
-        for attr_name in dir(self):
-            # get the attribute *on the class*, not the instance
-            attr = getattr(self.__class__, attr_name, None)
-        
-            # check if it's a property
-            if isinstance(attr, property):
-                
-                # Retrieve the value of the property attr
-                attr_val = getattr(self, attr_name)
-                
-                # If the property has a save() method, save the return value of
-                # that method
-                if hasattr(attr_val, "save") and callable(attr_val.save):
-                    attr_dict[attr_name] = attr_val.save()
-                else:
-                    attr_dict[attr_name] = attr_val
-                
-        # Append name
-        attr_dict['name'] = self.name
-                
-        return attr_dict
-    
     def __call__(self,data):
         return self.process(data)
     
@@ -121,6 +85,8 @@ class PreprocEngine(Engine):
 class PreprocEngAWA(PreprocEngine):
     
     name = 'PreprocEngAWA'
+    accepts = Payload.FRAME_RAW
+    emits = Payload.FRAME_RAW
     
     def __init__(self,**attr_dict):
         
@@ -307,6 +273,10 @@ class BackgroundSub(PreprocEngine):
     """
     
     name = 'BackgroundSub'
+    accepts = Payload.FRAME_MASKED
+    # emits is set from stack_raw, see its setter.
+    emits = Payload.FRAME_STACKED
+    feedback = Feedback('update_bg')
     
     def __init__(self,SensorType:int,**attr_dict):
         
@@ -397,6 +367,13 @@ class BackgroundSub(PreprocEngine):
     @stack_raw.setter
     def stack_raw(self,stack_raw:bool):
         self._stack_raw = bool(stack_raw)
+
+        # Stacking the raw channel is what makes this engine emit a 2-channel
+        # frame, so the contract follows the flag rather than being fixed on
+        # the class. DLEngine declares which of the two it accepts, and the
+        # chain check compares them.
+        self.emits = (Payload.FRAME_STACKED if self._stack_raw
+                      else Payload.FRAME_MASKED)
 
     # ---- Step 1: background construction -------------------------------
 
@@ -757,6 +734,8 @@ class MedianSub(PreprocEngine):
     """
 
     name = 'MedianSub'
+    accepts = (Payload.FRAME_MASKED, Payload.FRAME_STACKED)
+    emits = SAME
 
     def __init__(self,**attr_dict):
 
@@ -871,6 +850,8 @@ class MedianSub(PreprocEngine):
 class ZeroCorners(PreprocEngine):
         
     name = 'ZeroCorners'
+    accepts = Payload.FRAME_RAW
+    emits = Payload.FRAME_MASKED
         
     def __init__(self,**attr_dict):
         
@@ -994,6 +975,8 @@ class ShrinkCenter(PreprocEngine):
     this canvas' coordinates and must be mapped back by BoxRescale."""
 
     name = 'ShrinkCenter'
+    accepts = (Payload.FRAME_MASKED, Payload.FRAME_STACKED)
+    emits = SAME
 
     def __init__(self, **attr_dict):
         super().__init__(attr_dict['SensorType'])
