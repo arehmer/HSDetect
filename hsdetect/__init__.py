@@ -131,6 +131,13 @@ class Engine:
         What it hands on. SAME means "whatever it accepted".
     feedback : Feedback or None
         See Feedback.
+    path_params : tuple of str
+        Names of this engine's parameters that hold a filesystem path.
+        hsdetect.engine_io stores those relative to the parameter file and
+        resolves them again on the way back, so that a model directory can be
+        moved as a whole. Declared here, by the engine that owns the
+        parameter, rather than in one list in engine_io that has to know about
+        every engine.
     """
 
     name = None
@@ -138,6 +145,7 @@ class Engine:
     accepts = None
     emits = None
     feedback = None
+    path_params = ()
 
     def accepted_payloads(self) -> tuple:
         """`accepts` as a tuple, empty when the engine is untyped.

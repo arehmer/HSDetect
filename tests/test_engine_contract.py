@@ -183,8 +183,19 @@ def test_background_before_zerocorners_is_rejected():
 
 
 @pytest.mark.parametrize('config', ['v12_adam', 'v12_sgd'])
-def test_the_committed_broken_configs_are_rejected(config):
-    params = load_engine_params(MODELS / config / 'inf_engine_params.json')
+def test_the_committed_broken_configs_are_rejected_on_load(config):
+    """load_engine_params() validates by default, so a broken file is
+    rejected where it is read."""
+    with pytest.raises(ValueError, match='BackgroundSub'):
+        load_engine_params(MODELS / config / 'inf_engine_params.json')
+
+
+@pytest.mark.parametrize('config', ['v12_adam', 'v12_sgd'])
+def test_the_committed_broken_configs_are_rejected_on_build(config):
+    """And still rejected when loaded unvalidated, which is what the
+    add_live_engines scripts do before repairing the order."""
+    params = load_engine_params(MODELS / config / 'inf_engine_params.json',
+                                validate=False)
 
     with pytest.raises(ValueError, match='BackgroundSub'):
         build_engine(**params)
@@ -325,3 +336,55 @@ def test_step_records_every_engines_output_under_its_name():
     assert 'input' in result
     for name in chain.engine_names:
         assert name in result
+
+
+# ------------------------- the chain's dependencies -------------------------
+
+NO_CV2_PROGRAM = '''
+import builtins, sys
+import hspy.tparray                      # HSPy imports cv2 eagerly itself
+for m in [m for m in sys.modules if m == "cv2" or m.startswith("cv2.")]:
+    del sys.modules[m]
+real = builtins.__import__
+def fake(name, *a, **k):
+    if name == "cv2" or name.startswith("cv2."):
+        raise ImportError("the inference chain must not need cv2")
+    return real(name, *a, **k)
+builtins.__import__ = fake
+
+import warnings
+warnings.filterwarnings("ignore")
+import numpy as np
+from hsdetect import build_engine
+from hsdetect.engine_io import load_engine_params
+
+chain = build_engine(**load_engine_params(r"{config}"))
+for i in range(32):
+    result = chain.step(np.full((120, 160), 3000, np.uint16), i)
+
+assert chain["BackgroundSub"]._bg_valid, "background never became valid"
+assert "cv2" not in sys.modules, "something imported cv2 after all"
+print("OK")
+'''
+
+
+def test_the_inference_chain_needs_no_cv2():
+    """The device runtime is numpy, onnxruntime and hspy -- not OpenCV.
+
+    hsdetect.annot (and the custom cv2.htpa build behind it) belongs to
+    preparing and reviewing data, so the frame-by-frame path imports it
+    lazily and the dispatch guards keep the per-frame path away from it.
+
+    Run in a subprocess: hiding cv2 inside this one would disturb every
+    other test.
+    """
+    import subprocess
+    import sys
+
+    config = (MODELS / 'v14_sgd' / 'inf_engine_params.json').resolve()
+    result = subprocess.run([sys.executable, '-c',
+                             NO_CV2_PROGRAM.format(config=config)],
+                            capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'OK' in result.stdout

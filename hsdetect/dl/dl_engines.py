@@ -41,6 +41,7 @@ class DLEngine(Engine):
     # accepts is set from the model's channel count, see __init__.
     accepts = (Payload.FRAME_MASKED, Payload.FRAME_STACKED)
     emits = Payload.TENSOR
+    path_params = ('dl_model',)
 
     def __init__(self,
              SensorType:int,

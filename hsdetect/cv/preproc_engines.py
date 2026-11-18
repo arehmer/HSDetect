@@ -5,6 +5,11 @@ Created on Thu Jan 26 09:54:07 2023
 @author: Rehmer
 """
 
+# AnnotatedVideo / AnnotatedFrame appear in annotations below; deferring
+# them keeps this module importable without hsdetect.annot, and so
+# without cv2. See _AnnotatedVideo().
+from __future__ import annotations
+
 # from .gradient import  ConvolutionFilter
 
 import numpy as np
@@ -12,7 +17,6 @@ import copy
 import pandas as pd 
 import warnings
 
-from hsdetect.annot.annot import AnnotatedVideo, AnnotatedFrame
 from hsdetect.kernels import (detection_mask,
                               estimate_scene_level,
                               stack_channels,
@@ -44,6 +48,31 @@ def build_preprocessing_engine(**kwargs):
 
 
 import ast       
+
+
+def _AnnotatedVideo():
+    """hsdetect.annot.annot.AnnotatedVideo, imported on first use.
+
+    hsdetect.annot is deliberately NOT imported at module level: it pulls in
+    cv2 and matplotlib, which the frame-by-frame inference path -- the one
+    that runs on a device, and the one HSDetectTrain builds a chain with at
+    export time -- does not need. Only the AnnotatedVideo / AnnotatedFrame
+    code paths do, and those run while preparing or reviewing data.
+    """
+    from hsdetect.annot.annot import AnnotatedVideo
+
+    return AnnotatedVideo
+
+
+def _AnnotatedFrame():
+    """hsdetect.annot.annot.AnnotatedFrame, imported on first use.
+
+    See _AnnotatedVideo().
+    """
+    from hsdetect.annot.annot import AnnotatedFrame
+
+    return AnnotatedFrame
+
 def get_classes():
     with open(__file__, 'r') as f:
         tree = ast.parse(f.read(), filename=__file__)
@@ -76,7 +105,7 @@ class PreprocEngine(Engine):
             return self._process_frame(frame = data['frame'],
                                        idx = data['idx'],
                                        **kwargs)
-        elif isinstance(data,AnnotatedVideo):
+        elif isinstance(data,_AnnotatedVideo()):
             return self._process_avideo(data,**kwargs)
         else:
             raise NotImplementedError()
@@ -189,7 +218,7 @@ class PreprocEngAWA(PreprocEngine):
                         **kwargs):
         
         # Check if inputs have proper type
-        if not isinstance(video,AnnotatedVideo):
+        if not isinstance(video,_AnnotatedVideo()):
             raise TypeError('video is not type AnnotatedVideo')
 
         # Initialize list to store video with detection results in
@@ -220,14 +249,14 @@ class PreprocEngAWA(PreprocEngine):
         # annotations of the original AnnotatedVideo)
         filtered_aframes = []
         for idx,np_frame in filt_frames.items():
-            aframe = AnnotatedFrame(idx,
+            aframe = _AnnotatedFrame()(idx,
                                     np_frame,
                                     video[idx].annotations)
             
             filtered_aframes.append(aframe)
         
         # In the end return an annotated video
-        return AnnotatedVideo(filtered_aframes)
+        return _AnnotatedVideo()(filtered_aframes)
     
 
     
@@ -392,9 +421,9 @@ class BackgroundSub(PreprocEngine):
             return self._process_frame(frame = data['frame'],
                                        idx = data['idx'],
                                        **kwargs)
-        if isinstance(data,AnnotatedVideo):
+        if isinstance(data,_AnnotatedVideo()):
             return self._process_avideo(data,**kwargs)
-        elif isinstance(data,AnnotatedFrame):
+        elif isinstance(data,_AnnotatedFrame()):
             return self._process_aframe(data,**kwargs)
         else:
             raise NotImplementedError()
@@ -629,7 +658,7 @@ class BackgroundSub(PreprocEngine):
                         **kwargs):
         
         # Check if inputs have proper type
-        if not isinstance(video,AnnotatedVideo):
+        if not isinstance(video,_AnnotatedVideo()):
             raise TypeError('video is not type AnnotatedVideo')
 
         # Get keyword arguments
@@ -805,7 +834,10 @@ class MedianSub(PreprocEngine):
     def process(self,data,**kwargs):
         """Adds the AnnotatedFrame branch, which PreprocEngine.process() --
         whose other two branches are used unchanged -- does not handle."""
-        if isinstance(data,AnnotatedFrame):
+        # The dict guard comes first so that the per-frame path never
+        # reaches _AnnotatedFrame(), which would import hsdetect.annot (and
+        # cv2) on every frame. A dict is never an AnnotatedFrame.
+        if not isinstance(data,dict) and isinstance(data,_AnnotatedFrame()):
             return self._process_aframe(data,**kwargs)
 
         return super().process(data,**kwargs)
@@ -815,7 +847,7 @@ class MedianSub(PreprocEngine):
                         **kwargs):
 
         # Check if inputs have proper type
-        if not isinstance(video,AnnotatedVideo):
+        if not isinstance(video,_AnnotatedVideo()):
             raise TypeError('video is not type AnnotatedVideo')
 
         # Copy the whole video instead of rebuilding it from the processed
@@ -896,7 +928,7 @@ class ZeroCorners(PreprocEngine):
                         **kwargs):
         
         # Check if inputs have proper type
-        if not isinstance(video,AnnotatedVideo):
+        if not isinstance(video,_AnnotatedVideo()):
             raise TypeError('video is not type AnnotatedVideo')
 
         # Initialize list to store video with detection results in
@@ -927,14 +959,14 @@ class ZeroCorners(PreprocEngine):
         # annotations of the original AnnotatedVideo)
         zeroed_aframes = []
         for idx,np_frame in zeroed_frames.items():
-            aframe = AnnotatedFrame(idx,
+            aframe = _AnnotatedFrame()(idx,
                                     np_frame,
                                     video[idx].annotations)
             
             zeroed_aframes.append(aframe)
         
         # In the end return an annotated video
-        return AnnotatedVideo(zeroed_aframes)
+        return _AnnotatedVideo()(zeroed_aframes)
         
         
     def reset(self):

@@ -32,7 +32,11 @@ dir_out = file_out.parent
 dir_out.mkdir(exist_ok=True, parents=True)
 
 # %% Load inf_engine_params.json
-engine_params_dict = load_engine_params(file_in)
+# validate=False: this script exists to REPAIR a chain -- it reorders the
+# engines (see engine_order above) and inserts the pose classifier, so what it
+# loads is not required to be a valid chain yet. The result is checked when it
+# is next loaded.
+engine_params_dict = load_engine_params(file_in, validate=False)
 
 engine_pipeline = engine_params_dict['engines']
 # %% Change dl_model path

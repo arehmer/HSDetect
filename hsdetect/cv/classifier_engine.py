@@ -616,6 +616,7 @@ class BoxPoseClassifier(ClassifierEngine):
     name = 'BoxPoseClassifier'
     accepts = Payload.BOXES
     emits = SAME
+    path_params = ('model_file',)
 
     def __init__(self, model_file):
 

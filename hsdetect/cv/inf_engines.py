@@ -26,6 +26,11 @@ detections. See the note at the bottom of the accompanying explanation
 for how that would build on top of this.
 """
 
+# AnnotatedVideo / AnnotatedFrame appear in annotations below; deferring
+# them keeps this module importable without hsdetect.annot, and so
+# without cv2. See _AnnotatedVideo().
+from __future__ import annotations
+
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -34,10 +39,6 @@ import pandas as pd
 import logging
 
 
-try:
-    from ..misc.annot import AnnotatedVideo, AnnotatedFrame
-except:
-    from hsdetect.annot.annot import AnnotatedVideo, AnnotatedFrame
     
 from hsdetect import build_engine, Engine, Payload, SAME
 
@@ -54,6 +55,31 @@ def build_inference_engine(**kwargs):
 
 
 import ast       
+
+
+def _AnnotatedVideo():
+    """hsdetect.annot.annot.AnnotatedVideo, imported on first use.
+
+    hsdetect.annot is deliberately NOT imported at module level: it pulls in
+    cv2 and matplotlib, which the frame-by-frame inference path -- the one
+    that runs on a device, and the one HSDetectTrain builds a chain with at
+    export time -- does not need. Only the AnnotatedVideo / AnnotatedFrame
+    code paths do, and those run while preparing or reviewing data.
+    """
+    from hsdetect.annot.annot import AnnotatedVideo
+
+    return AnnotatedVideo
+
+
+def _AnnotatedFrame():
+    """hsdetect.annot.annot.AnnotatedFrame, imported on first use.
+
+    See _AnnotatedVideo().
+    """
+    from hsdetect.annot.annot import AnnotatedFrame
+
+    return AnnotatedFrame
+
 def get_classes():
     with open(__file__, 'r') as f:
         tree = ast.parse(f.read(), filename=__file__)
@@ -276,7 +302,10 @@ class InferenceEngine(Engine):
     def __call__(self, data, frame_idx = None, conf_min = 0.9, **kwargs):
 
         # Check type of passed data
-        if isinstance(data,AnnotatedVideo):
+        # The ndarray guard comes first so that the per-frame path never
+        # reaches _AnnotatedVideo(), which would import hsdetect.annot (and
+        # cv2) on every call. An ndarray is never an AnnotatedVideo.
+        if not isinstance(data,np.ndarray) and isinstance(data,_AnnotatedVideo()):
             
             video_res = {}
             
@@ -305,10 +334,10 @@ class InferenceEngine(Engine):
             # Convert to AnnotatedVideo
             aframes = []
             for idx, res in video_res.items():
-                aframe = AnnotatedFrame(idx,res[0],res[1])
+                aframe = _AnnotatedFrame()(idx,res[0],res[1])
                 aframes.append(aframe)
                 
-            avideo = AnnotatedVideo()
+            avideo = _AnnotatedVideo()()
             avideo.from_AnnotatedFrames(frames=aframes)
             return avideo
         
@@ -523,11 +552,11 @@ class InferenceEngine(Engine):
         # for every frame if multiple exist.
         avideo_dict = {}
         for result in frame_results:
-            avideo_dict[result['idx']] = AnnotatedFrame(result['idx'],
+            avideo_dict[result['idx']] = _AnnotatedFrame()(result['idx'],
                                                         result['frame'],
                                                         result.pop('annotations',None))
         
-        return AnnotatedVideo(list(avideo_dict.values()))
+        return _AnnotatedVideo()(list(avideo_dict.values()))
             
             
             
