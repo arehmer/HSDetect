@@ -18,8 +18,9 @@ from hsdetect import Engine, build_engine
 from hsdetect import engine_io
 from hsdetect.engine_io import (load_engine_params, save_engine_params,
                                 validate_params)
+from tests.model_paths import models_dir, skip_without_run
 
-MODELS = pathlib.Path('demos/live/multiprocessed/models')
+MODELS = models_dir()
 GOOD = MODELS / 'v14_sgd' / 'inf_engine_params.json'
 BROKEN = MODELS / 'v12_adam' / 'inf_engine_params.json'
 
@@ -49,6 +50,7 @@ def test_an_unknown_engine_name_has_no_path_params():
 def test_the_tuple_coercion_is_the_engines_job():
     """yolo_grid_size stays a list in the dict and becomes a tuple on the
     engine, which is why TUPLE_KEYS was not replaced by anything."""
+    skip_without_run('v14_sgd')
     params = load_engine_params(GOOD)
     decoder = next(e for e in params['engines']
                    if e['name'] == 'YOLO_EnDecode_Engine')
@@ -63,6 +65,7 @@ def test_the_tuple_coercion_is_the_engines_job():
 # ------------------------------- validation ---------------------------------
 
 def test_validate_accepts_a_good_chain_as_a_dict_and_as_a_path():
+    skip_without_run('v14_sgd')
     params = load_engine_params(GOOD, validate=False)
 
     assert validate_params(params) is params
@@ -70,6 +73,7 @@ def test_validate_accepts_a_good_chain_as_a_dict_and_as_a_path():
 
 
 def test_validate_rejects_a_broken_chain():
+    skip_without_run('v12_adam')
     params = load_engine_params(BROKEN, validate=False)
 
     with pytest.raises(ValueError, match='BackgroundSub'):
@@ -80,6 +84,7 @@ def test_validate_does_not_mutate_what_it_is_given():
     """build_engine() pops from the dict it is handed, so validate_params()
     has to work on a copy -- otherwise validating would consume the caller's
     parameters."""
+    skip_without_run('v14_sgd')
     params = load_engine_params(GOOD, validate=False)
     before = copy.deepcopy(params)
 
@@ -91,6 +96,7 @@ def test_validate_does_not_mutate_what_it_is_given():
 
 
 def test_validate_rejects_an_unknown_engine():
+    skip_without_run('v14_sgd')
     params = load_engine_params(GOOD, validate=False)
     params['engines'][1]['name'] = 'NoSuchEngine'
 
@@ -99,6 +105,7 @@ def test_validate_rejects_an_unknown_engine():
 
 
 def test_validate_rejects_a_missing_parameter():
+    skip_without_run('v14_sgd')
     params = load_engine_params(GOOD, validate=False)
     del params['engines'][0]['SensorType']
 
@@ -109,6 +116,7 @@ def test_validate_rejects_a_missing_parameter():
 def test_validate_rejects_a_chain_whose_model_wants_other_channels():
     """What _check_input_channels() used to do, now from the declarations:
     the model takes a stacked frame, so BackgroundSub must stack."""
+    skip_without_run('v14_sgd')
     params = load_engine_params(GOOD, validate=False)
     background = next(e for e in params['engines']
                       if e['name'] == 'BackgroundSub')
@@ -121,6 +129,7 @@ def test_validate_rejects_a_chain_whose_model_wants_other_channels():
 # --------------------------------- loading ----------------------------------
 
 def test_load_validates_by_default():
+    skip_without_run('v12_adam')
     with pytest.raises(ValueError):
         load_engine_params(BROKEN)
 
@@ -128,6 +137,7 @@ def test_load_validates_by_default():
 def test_load_can_skip_validation():
     """For a caller that is about to repair the chain, as
     demos/live/multiprocessed/add_live_engines.py does."""
+    skip_without_run('v12_adam')
     params = load_engine_params(BROKEN, validate=False)
 
     assert [e['name'] for e in params['engines']][:3] == \
@@ -135,6 +145,7 @@ def test_load_can_skip_validation():
 
 
 def test_load_resolves_a_declared_path_against_the_file():
+    skip_without_run('v14_sgd')
     params = load_engine_params(GOOD.resolve())
     dl_model = pathlib.Path(next(e for e in params['engines']
                                  if e['name'] == 'DLEngine')['dl_model'])
@@ -148,6 +159,7 @@ def test_load_resolves_a_declared_path_against_the_file():
 
 def test_save_stores_a_declared_path_relative_to_the_file(tmp_path):
     """So that a model directory can be moved or copied as a whole."""
+    skip_without_run('v14_sgd')
     params = load_engine_params(GOOD.resolve())
     out = tmp_path / 'inf_engine_params.json'
 
@@ -164,6 +176,7 @@ def test_save_stores_a_declared_path_relative_to_the_file(tmp_path):
 def test_save_does_not_validate(tmp_path):
     """A caller assembling a chain in steps has to be able to write an
     intermediate state; the check happens when it is loaded again."""
+    skip_without_run('v12_adam')
     params = load_engine_params(BROKEN, validate=False)
     out = tmp_path / 'inf_engine_params.json'
 
@@ -178,6 +191,7 @@ def test_save_does_not_validate(tmp_path):
 
 
 def test_a_chain_round_trips_through_a_file(tmp_path):
+    skip_without_run('v14_sgd')
     original = load_engine_params(GOOD.resolve())
     out = tmp_path / 'chain.json'
 

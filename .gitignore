@@ -179,3 +179,17 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# ---- Trained networks and run folders --------------------------------------
+# A run folder is the output of a training run (yolotiny.training.save_detector
+# in HSDetectTrain): weights, the ONNX export and the engine chain config. The
+# weights belong next to that run, not in this repository -- six of them were
+# committed here, three unique models stored twice, 30 MB of working tree.
+#
+# The tests find run folders through HSDETECT_MODELS and skip without them.
+# See demos/live/multiprocessed/models/README.md.
+*.onnx
+*.keras
+*.avideo
+
+# Presentations and other documents do not belong next to the models either.
+demos/live/multiprocessed/models/*.pptx

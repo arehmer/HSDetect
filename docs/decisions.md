@@ -3,6 +3,41 @@
 Things that were decided and would otherwise only be visible as an absence.
 Newest first.
 
+## 2026-11-19 — Trained networks are not committed
+
+The six `YOLOv2Tiny8X.onnx` files under `demos/live/multiprocessed/models`
+were removed, together with a presentation that had ended up beside them.
+They were three unique models stored twice each: a `<run>_live` folder kept a
+byte-identical copy of its parent's network, because `add_live_engines.py`
+expects the model in its output directory. 30 MB of working tree for three
+networks, down to 2 MB.
+
+`.gitignore` now excludes `*.onnx`, `*.keras` and `*.avideo`, which is the
+part that actually matters: deleting the files did not shrink any clone, since
+git history still holds the blobs. The rules stop the next run folder being
+committed.
+
+The tests find run folders through `HSDETECT_MODELS` and skip without one,
+naming the file they wanted. Without models the suite runs 76 tests and skips
+28; with `HSDETECT_MODELS` set it runs all 102. See
+`demos/live/multiprocessed/models/README.md`.
+
+## 2026-11-19 — ImportData.py stays on the old CVAT path for now
+
+`HSDetectTrain/ImportData.py` uses `hsod.cvat.sdk.CVATProjectMgr`, and the
+path going forward is `hsod.project.LabelingProject`. It was not moved,
+because it cannot be moved on its own: everything the script produces is
+`data/original/<cvat_id>.avideo`, pickled `AnnotatedVideo` objects, and
+`LabelingProject`'s layout has no `.avideo` — it stores `sequences/<seq>.h5`
+and `annotations/raw/<task>.json`.
+
+The consumers are `yolotiny/dataset.py` and
+`SkLearnPose/01_ImportAnnotations.py`, both via `common.avideo.load_avideo()`.
+So the script, its two consumers and `common/avideo.py` move together, in one
+piece of work that wants a recording and a TensorFlow environment at hand so
+the training arrays can be compared before and after. `ImportData.py` carries
+a header saying so.
+
 ## 2026-11-19 — Posture detection is dropped
 
 `PostureNetEngine` and `hsdetect/cv/posture_engines.py` (1032 lines) were

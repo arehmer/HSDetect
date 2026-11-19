@@ -21,8 +21,9 @@ from hsdetect.cv.inf_engines import InferenceEngine
 from hsdetect.cv.preproc_engines import (BackgroundSub, MedianSub,
                                          PreprocEngAWA, ZeroCorners)
 from hsdetect.engine_io import load_engine_params
+from tests.model_paths import models_dir, skip_without_run
 
-MODELS = pathlib.Path('demos/live/multiprocessed/models')
+MODELS = models_dir()
 SENSOR_TYPE = 2
 H, W = 120, 160
 
@@ -133,6 +134,7 @@ def test_background_sub_emits_follows_stack_raw():
 def test_dl_engine_accepts_what_its_model_was_built_for():
     """Replaces the old _check_input_channels(), which had to name DLEngine
     and BackgroundSub to compare their channel counts."""
+    skip_without_run('v14_sgd')
     params = load_engine_params(MODELS / 'v14_sgd' / 'inf_engine_params.json')
     spec = next(e for e in params['engines'] if e['name'] == 'DLEngine')
 
@@ -155,6 +157,7 @@ def test_dl_engine_without_a_model_falls_back_to_the_class_contract():
 # ------------------------------ _check_chain --------------------------------
 
 def _good_chain_specs():
+    skip_without_run('v14_sgd')
     return load_engine_params(MODELS / 'v14_sgd' / 'inf_engine_params.json')
 
 
@@ -186,6 +189,7 @@ def test_background_before_zerocorners_is_rejected():
 def test_the_committed_broken_configs_are_rejected_on_load(config):
     """load_engine_params() validates by default, so a broken file is
     rejected where it is read."""
+    skip_without_run(config)
     with pytest.raises(ValueError, match='BackgroundSub'):
         load_engine_params(MODELS / config / 'inf_engine_params.json')
 
@@ -194,6 +198,7 @@ def test_the_committed_broken_configs_are_rejected_on_load(config):
 def test_the_committed_broken_configs_are_rejected_on_build(config):
     """And still rejected when loaded unvalidated, which is what the
     add_live_engines scripts do before repairing the order."""
+    skip_without_run(config)
     params = load_engine_params(MODELS / config / 'inf_engine_params.json',
                                 validate=False)
 
@@ -203,6 +208,7 @@ def test_the_committed_broken_configs_are_rejected_on_build(config):
 
 @pytest.mark.parametrize('config', ['v14_sgd'])
 def test_the_committed_good_configs_build(config):
+    skip_without_run(config)
     chain = build_engine(**load_engine_params(MODELS / config
                                               / 'inf_engine_params.json'))
 
@@ -378,6 +384,7 @@ def test_the_inference_chain_needs_no_cv2():
     Run in a subprocess: hiding cv2 inside this one would disturb every
     other test.
     """
+    skip_without_run('v14_sgd')
     import subprocess
     import sys
 

@@ -23,6 +23,7 @@ import pandas as pd
 import pytest
 
 from hsdetect import build_engine
+from tests.model_paths import skip_without_run
 from tests.make_golden_onnx import (CONF_THRESHOLD, MODEL_DIR, OUT_CSV,
                                     OUT_NPZ, engine_params, make_input)
 
@@ -53,6 +54,7 @@ def chain_params():
 
 @pytest.fixture(scope='module')
 def dl_engine(chain_params):
+    skip_without_run('v12_adam')
     params = dict(engine_params(chain_params, 'DLEngine'))
     params['dl_model'] = str(MODEL_DIR / params['dl_model'])
     return build_engine(**params)

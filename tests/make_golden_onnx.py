@@ -31,13 +31,22 @@ physically plausible, not the real preprocessing output.
 import json
 import pathlib
 import pickle
+import sys
 
 import numpy as np
 
 from hsdetect import build_engine
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
-MODEL_DIR = REPO / 'demos' / 'live' / 'multiprocessed' / 'models' / 'v12_adam'
+
+# Importable both as tests.make_golden_onnx and as a script run from anywhere.
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from tests.model_paths import models_dir  # noqa: E402
+
+# Honours HSDETECT_MODELS, since the trained networks are not committed.
+MODEL_DIR = models_dir() / 'v12_adam'
 FRAME_PKL = REPO / 'tests' / 'data' / 'Video2485236_Frame80_img.pkl'
 OUT_NPZ = REPO / 'tests' / 'data' / 'golden_onnx_v12_adam.npz'
 OUT_CSV = REPO / 'tests' / 'data' / 'golden_onnx_v12_adam_boxes.csv'
