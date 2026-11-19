@@ -193,3 +193,5 @@ cython_debug/
 
 # Presentations and other documents do not belong next to the models either.
 demos/live/multiprocessed/models/*.pptx
+*.h5
+*.json
